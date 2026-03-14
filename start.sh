@@ -1,6 +1,14 @@
 export COMPOSE_PROJECT_NAME=moodle34
 export MOODLE_DOCKER_WEB_PORT=80
 export MOODLE_DOCKER_WEB_HOST=localhost
+export MOODLE_DOCKER_WWWROOT=./moodle
+export MOODLE_DOCKER_DB=pgsql
+
+cp config.docker-template.php $MOODLE_DOCKER_WWWROOT/config.php
+
+bin/moodle-docker-compose down
+bin/moodle-docker-compose up -d
+bin/moodle-docker-wait-for-db
 
 bin/moodle-docker-compose exec webserver php admin/tool/behat/cli/init.php
 bin/moodle-docker-compose exec -u www-data webserver php admin/tool/behat/cli/run.php --tags=@auth_manual

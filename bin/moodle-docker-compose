@@ -1,246 +1,171 @@
 #!/usr/bin/env bash
 set -e
 
-# First find out if this was called from symlink,
-# then find the real path of parent directory.
-# This is needed because macOS does not have GNU realpath.
+# ===========================================================
+# Moodle Docker helper script (macOS + Docker Compose v2)
+# ===========================================================
+
+# Determine real path of this script
 thisfile=$( readlink "${BASH_SOURCE[0]}" ) || thisfile="${BASH_SOURCE[0]}"
 basedir="$( cd "$( dirname "$thisfile" )/../" && pwd -P )"
 
-if [ ! -d "$MOODLE_DOCKER_WWWROOT" ];
-then
+# Check required environment variables
+if [ ! -d "$MOODLE_DOCKER_WWWROOT" ]; then
     echo 'Error: $MOODLE_DOCKER_WWWROOT is not set or not an existing directory'
     exit 1
 fi
 
-if [ -z "$MOODLE_DOCKER_DB" ];
-then
+if [ -z "$MOODLE_DOCKER_DB" ]; then
     echo 'Error: $MOODLE_DOCKER_DB is not set'
     exit 1
 fi
 
 export ASSETDIR="${basedir}/assets"
 
-# Test if we have docker compose v2 or v5, and keep quiet if we don't.
-ver=$(docker compose version > /dev/null 2>&1 && docker compose version --short) || true
-if [[ $ver =~ ^v?[2|5] ]]; then
-  dockercompose="docker compose"
+# ----------------------------
+# Docker Compose detection
+# ----------------------------
+if docker compose version > /dev/null 2>&1; then
+    dockercompose=(docker compose)
 else
-  echo "Compose ${ver} is not available in Docker CLI, falling back to use docker-compose script"
-  dockercompose="docker-compose"
+    dockercompose=(docker-compose)
 fi
-dockercompose="${dockercompose} -f ${basedir}/base.yml"
-dockercompose="${dockercompose} -f ${basedir}/service.mail.yml"
 
-# PHP Version.
+# ----------------------------
+# Base compose files
+# ----------------------------
+dockercompose+=(-f "${basedir}/base.yml")
+dockercompose+=(-f "${basedir}/service.mail.yml")
+
+# PHP version
 export MOODLE_DOCKER_PHP_VERSION=${MOODLE_DOCKER_PHP_VERSION:-8.3}
 
-# Database flavour.
-dockercompose="${dockercompose} -f ${basedir}/db.${MOODLE_DOCKER_DB}.yml"
+# Database file
+dockercompose+=(-f "${basedir}/db.${MOODLE_DOCKER_DB}.yml")
 
-# Add support for version specific database settings.
-if [ ! -z "$MOODLE_DOCKER_DB_VERSION" ];
-then
+# Optional DB version
+if [ ! -z "$MOODLE_DOCKER_DB_VERSION" ]; then
     filename="${basedir}/db.${MOODLE_DOCKER_DB}.${MOODLE_DOCKER_DB_VERSION}.yml"
-    if [ -f $filename ]; then
-        dockercompose="${dockercompose} -f ${filename}"
+    if [ -f "$filename" ]; then
+        dockercompose+=(-f "$filename")
     fi
 fi
 
-# Support PHP version overrides for DB not available any more.
-
-# Expose DB port if requested.
-if [[ $MOODLE_DOCKER_DB_PORT == *":"* ]] || [[ $MOODLE_DOCKER_DB_PORT -gt 0 ]]
-then
-    # If no bind ip has been configured (bind_ip:port), default to 127.0.0.1
-    if [[ ! $MOODLE_DOCKER_DB_PORT == *":"* ]]
-    then
+# Optional DB port override
+if [[ $MOODLE_DOCKER_DB_PORT == *":"* ]] || [[ $MOODLE_DOCKER_DB_PORT -gt 0 ]]; then
+    if [[ ! $MOODLE_DOCKER_DB_PORT == *":"* ]]; then
         export MOODLE_DOCKER_DB_PORT=127.0.0.1:$MOODLE_DOCKER_DB_PORT
     fi
     filename="${basedir}/db.${MOODLE_DOCKER_DB}.port.yml"
-    if [ -f $filename ];
-    then
-        dockercompose="${dockercompose} -f ${filename}"
+    if [ -f "$filename" ]; then
+        dockercompose+=(-f "$filename")
     fi
 fi
 
-# Guess mobile app runtime
-if [ -z "$MOODLE_DOCKER_APP_RUNTIME" ];
-then
-    if [[ ! -z "$MOODLE_DOCKER_APP_PATH" ]];
-    then
+# ----------------------------
+# Mobile app runtime detection
+# ----------------------------
+if [ -z "$MOODLE_DOCKER_APP_RUNTIME" ]; then
+    if [[ ! -z "$MOODLE_DOCKER_APP_PATH" ]]; then
         appversion="$(cat $MOODLE_DOCKER_APP_PATH/package.json | sed -n -E 's/\s*"version": "([0-9]+\.[0-9]+\.[0-9]+)(.*)?",/\1/p')"
-    elif [[ ! -z "$MOODLE_DOCKER_APP_VERSION" ]];
-    then
+    elif [[ ! -z "$MOODLE_DOCKER_APP_VERSION" ]]; then
         appversion=$MOODLE_DOCKER_APP_VERSION
     fi
 
-    if [[ ! -z $appversion ]];
-    then
-        if [[ ! -z "$(echo $appversion | sed -n -E 's/([0-9]+\.[0-9]+\.[0-9]+)/\1/p')" ]];
-        then
-            appmajorversion="$(echo $appversion | sed -n -E 's/([0-9]+)\.[0-9]+\.[0-9]+/\1/p')"
-            appminorversion="$(echo $appversion | sed -n -E 's/[0-9]+\.([0-9]+)\.[0-9]+/\1/p')"
+    if [[ ! -z $appversion ]]; then
+        appmajorversion=$(echo $appversion | cut -d. -f1)
+        appminorversion=$(echo $appversion | cut -d. -f2)
 
-            if (( $appmajorversion > 4 || $appminorversion > 3));
-            then
-                export MOODLE_DOCKER_APP_RUNTIME="ionic7"
-            else
-                export MOODLE_DOCKER_APP_RUNTIME="ionic5"
-            fi
-        else
+        if (( appmajorversion > 4 || appminorversion > 3 )); then
             export MOODLE_DOCKER_APP_RUNTIME="ionic7"
+        else
+            export MOODLE_DOCKER_APP_RUNTIME="ionic5"
         fi
     fi
 fi
 
-# Guess mobile app node version (only for local app development)
-if [[ -z "$MOODLE_DOCKER_APP_NODE_VERSION" ]]  && [[ ! -z "$MOODLE_DOCKER_APP_PATH" ]];
-then
+# Node version for mobile app
+if [[ -z "$MOODLE_DOCKER_APP_NODE_VERSION" ]] && [[ ! -z "$MOODLE_DOCKER_APP_PATH" ]]; then
     appnodeversion="$(cat $MOODLE_DOCKER_APP_PATH/.nvmrc | sed -E "s/v(([0-9]+\.?)+)/\1/" || true)"
     appnodeversion="${appnodeversion//\//-}"
-
     export MOODLE_DOCKER_APP_NODE_VERSION="$appnodeversion"
 fi
 
-# Guess mobile app port (only when using Docker app images)
-if [[ -z "$MOODLE_DOCKER_APP_PORT" ]] && [[ ! -z "$MOODLE_DOCKER_APP_VERSION" ]];
-then
-    if [[ "$MOODLE_DOCKER_APP_RUNTIME" = "ionic5" ]];
-    then
-        export MOODLE_DOCKER_APP_PORT="80"
-    else
-        export MOODLE_DOCKER_APP_PORT="443"
-    fi
-fi
+# Mobile app port & protocol
+export MOODLE_DOCKER_APP_PORT=${MOODLE_DOCKER_APP_PORT:-${MOODLE_DOCKER_APP_RUNTIME=="ionic5" && echo 80 || echo 443}}
+export MOODLE_DOCKER_APP_PROTOCOL=${MOODLE_DOCKER_APP_PROTOCOL:-${MOODLE_DOCKER_APP_RUNTIME=="ionic5" && echo http || echo https}}
 
-# Guess mobile app protocol
-if [[ -z "$MOODLE_DOCKER_APP_PROTOCOL" ]];
-then
-    if [[ "$MOODLE_DOCKER_APP_RUNTIME" = "ionic5" ]];
-    then
-        export MOODLE_DOCKER_APP_PROTOCOL="http"
-    else
-        export MOODLE_DOCKER_APP_PROTOCOL="https"
-    fi
-fi
-
-# Selenium browser
+# ----------------------------
+# Selenium browser detection
+# ----------------------------
 browserparts=(${MOODLE_DOCKER_BROWSER//:/ })
-export MOODLE_DOCKER_BROWSER_NAME=${browserparts[0]}
-export MOODLE_DOCKER_BROWSER_TAG=${browserparts[1]}
+export MOODLE_DOCKER_BROWSER_NAME=${browserparts[0]:-firefox}
+export MOODLE_DOCKER_BROWSER_TAG=${browserparts[1]:-4}
 
-if [[ -z "$MOODLE_DOCKER_BROWSER_NAME" ]];
-then
-    MOODLE_DOCKER_BROWSER_NAME=firefox
-fi
-
-if [[ -z "$MOODLE_DOCKER_BROWSER_TAG" ]];
-then
-    MOODLE_DOCKER_BROWSER_TAG=4
-fi
-
-# Mobile app for development
-if [[ "$MOODLE_DOCKER_BROWSER_NAME" == "chrome" ]];
-then
-    if [[ ! -z "$MOODLE_DOCKER_APP_PATH" ]];
-    then
-        dockercompose="${dockercompose} -f ${basedir}/moodle-app-dev.yml"
-    elif [[ ! -z "$MOODLE_DOCKER_APP_VERSION" ]];
-    then
-        # Mobile app using a docker image
-        dockercompose="${dockercompose} -f ${basedir}/moodle-app.yml"
+if [[ "$MOODLE_DOCKER_BROWSER_NAME" == "chrome" ]]; then
+    if [[ ! -z "$MOODLE_DOCKER_APP_PATH" ]]; then
+        dockercompose+=(-f "${basedir}/moodle-app-dev.yml")
+    elif [[ ! -z "$MOODLE_DOCKER_APP_VERSION" ]]; then
+        dockercompose+=(-f "${basedir}/moodle-app.yml")
     fi
 fi
 
-if [[ "$MOODLE_DOCKER_BROWSER_NAME" != "firefox" ]];
-then
-    dockercompose="${dockercompose} -f ${basedir}/selenium.${MOODLE_DOCKER_BROWSER_NAME}.yml"
+if [[ "$MOODLE_DOCKER_BROWSER_NAME" != "firefox" ]]; then
+    dockercompose+=(-f "${basedir}/selenium.${MOODLE_DOCKER_BROWSER_NAME}.yml")
 fi
 
 # Selenium VNC port
-export MOODLE_DOCKER_SELENIUM_SUFFIX=""
-if [[ $MOODLE_DOCKER_SELENIUM_VNC_PORT == *":"* ]] || [[ $MOODLE_DOCKER_SELENIUM_VNC_PORT -gt 0 ]]
-then
-    if [[ $(echo $MOODLE_DOCKER_BROWSER_TAG | sed 's/[^0-9].*//g') -lt 4 ]]
-    then
+if [[ $MOODLE_DOCKER_SELENIUM_VNC_PORT == *":"* ]] || [[ $MOODLE_DOCKER_SELENIUM_VNC_PORT -gt 0 ]]; then
+    if [[ $(echo $MOODLE_DOCKER_BROWSER_TAG | sed 's/[^0-9].*//g') -lt 4 ]]; then
         export MOODLE_DOCKER_SELENIUM_SUFFIX="-debug"
     fi
-
-    # If no bind ip has been configured (bind_ip:port), default to 127.0.0.1
-    if [[ ! $MOODLE_DOCKER_SELENIUM_VNC_PORT == *":"* ]]
-    then
+    if [[ ! $MOODLE_DOCKER_SELENIUM_VNC_PORT == *":"* ]]; then
         MOODLE_DOCKER_SELENIUM_VNC_PORT=127.0.0.1:$MOODLE_DOCKER_SELENIUM_VNC_PORT
     fi
-    dockercompose="${dockercompose} -f ${basedir}/selenium.debug.yml"
+    dockercompose+=(-f "${basedir}/selenium.debug.yml")
 fi
 
-# External services
-if [[ ! -z "$MOODLE_DOCKER_PHPUNIT_EXTERNAL_SERVICES" ]];
-then
-    dockercompose="${dockercompose} -f ${basedir}/phpunit-external-services.yml"
-fi
+# Optional external services, mocks, ML backend
+[[ ! -z "$MOODLE_DOCKER_PHPUNIT_EXTERNAL_SERVICES" ]] && dockercompose+=(-f "${basedir}/phpunit-external-services.yml")
+[[ ! -z "$MOODLE_DOCKER_BBB_MOCK" ]] && dockercompose+=(-f "${basedir}/bbb-mock.yml")
+[[ ! -z "$MOODLE_DOCKER_MATRIX_MOCK" ]] && dockercompose+=(-f "${basedir}/matrix-mock.yml")
+[[ ! -z "$MOODLE_DOCKER_MLBACKEND" ]] && dockercompose+=(-f "${basedir}/mlbackend.yml")
 
-# BBB Mock
-if [[ ! -z "$MOODLE_DOCKER_BBB_MOCK" ]];
-then
-    dockercompose="${dockercompose} -f ${basedir}/bbb-mock.yml"
-fi
-
-# Matrix Mock
-if [[ ! -z "$MOODLE_DOCKER_MATRIX_MOCK" ]];
-then
-    dockercompose="${dockercompose} -f ${basedir}/matrix-mock.yml"
-fi
-
-# Machine Learning backend
-if [[ ! -z "$MOODLE_DOCKER_MLBACKEND" ]];
-then
-    dockercompose="${dockercompose} -f ${basedir}/mlbackend.yml"
-fi
-
-#  Faildump directory
-if [[ ! -z "$MOODLE_DOCKER_BEHAT_FAILDUMP" ]];
-then
-    if [ ! -d "$MOODLE_DOCKER_BEHAT_FAILDUMP" ];
-    then
+# Faildump
+if [[ ! -z "$MOODLE_DOCKER_BEHAT_FAILDUMP" ]]; then
+    if [ ! -d "$MOODLE_DOCKER_BEHAT_FAILDUMP" ]; then
         echo 'Error: $MOODLE_DOCKER_BEHAT_FAILDUMP is not an existing directory'
         exit 1
     fi
-    dockercompose="${dockercompose} -f ${basedir}/behat-faildump.yml"
+    dockercompose+=(-f "${basedir}/behat-faildump.yml")
 fi
 
-# Webserver host
+# Webserver
 export MOODLE_DOCKER_WEB_HOST=${MOODLE_DOCKER_WEB_HOST:-localhost}
-
-# Webserver port
 export MOODLE_DOCKER_WEB_PORT=${MOODLE_DOCKER_WEB_PORT:-8000}
-if [[ $MOODLE_DOCKER_WEB_PORT == *":"* ]] || [[ $MOODLE_DOCKER_WEB_PORT -gt 0 ]]
-then
-    # If no bind ip has been configured (bind_ip:port), default to 127.0.0.1
-    if [[ ! $MOODLE_DOCKER_WEB_PORT == *":"* ]]
-    then
+if [[ $MOODLE_DOCKER_WEB_PORT == *":"* ]] || [[ $MOODLE_DOCKER_WEB_PORT -gt 0 ]]; then
+    if [[ ! $MOODLE_DOCKER_WEB_PORT == *":"* ]]; then
         MOODLE_DOCKER_WEB_PORT=127.0.0.1:$MOODLE_DOCKER_WEB_PORT
     fi
-    dockercompose="${dockercompose} -f ${basedir}/webserver.port.yml"
+    dockercompose+=(-f "${basedir}/webserver.port.yml")
 fi
 
-# Behat test timeout factor
+# Timeout factor
 export MOODLE_DOCKER_TIMEOUT_FACTOR=${MOODLE_DOCKER_TIMEOUT_FACTOR:-1}
 
-# Mac OS Compatbility
+# Mac OS cached volumes
 if [[ "$(uname)" == "Darwin" ]]; then
-    # Support https://docs.docker.com/docker-for-mac/osxfs-caching/
-    dockercompose="${dockercompose} -f ${basedir}/volumes-cached.yml"
+    dockercompose+=(-f "${basedir}/volumes-cached.yml")
 fi
 
-# Apply local customisations if a local.yml is found.
-# Note: This must be the final modification before the docker-compose command is called.
+# Local overrides
 localfile="${basedir}/local.yml"
-if [ -f "${localfile}" ]
-then
-  echo "Including local options from ${localfile}"
-  dockercompose="${dockercompose} -f ${localfile}"
+if [ -f "$localfile" ]; then
+    echo "Including local options from ${localfile}"
+    dockercompose+=(-f "$localfile")
 fi
 
-$dockercompose "$@"
+# =============================
+# Run the command
+# =============================
+"${dockercompose[@]}" "$@"

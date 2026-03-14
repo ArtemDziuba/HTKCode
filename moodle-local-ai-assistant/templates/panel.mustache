@@ -1,0 +1,301 @@
+{{!
+    @template local_ai_assistant/panel
+
+    AI Assistant side panel injected on the new course creation page.
+    Strings are pre-rendered from PHP (Ukrainian).
+}}
+
+<div id="ai-assistant-panel" class="ai-assistant-panel" role="complementary" aria-label="{{title}}">
+
+    <div class="ai-assistant-header">
+        <span class="ai-assistant-icon">✦</span>
+        <h6 class="ai-assistant-title">{{title}}</h6>
+        <button class="ai-assistant-toggle" id="ai-assistant-toggle" aria-label="Згорнути" title="Згорнути">&#x2715;</button>
+    </div>
+
+    <div class="ai-assistant-body" id="ai-assistant-body">
+        <form id="ai-assistant-form" autocomplete="off">
+            <textarea
+                id="ai-assistant-prompt"
+                class="ai-assistant-textarea"
+                rows="4"
+                placeholder="{{placeholder}}"
+                maxlength="2000"
+                aria-label="{{placeholder}}"
+            ></textarea>
+
+            <div class="ai-assistant-actions">
+                <button
+                    type="button"
+                    id="ai-assistant-clear"
+                    class="ai-assistant-btn ai-assistant-btn--ghost"
+                    data-label="{{clear_label}}"
+                >
+                    {{clear_label}}
+                </button>
+                <button
+                    type="submit"
+                    id="ai-assistant-submit"
+                    class="ai-assistant-btn ai-assistant-btn--primary"
+                    data-submit-label="{{submit_label}}"
+                    data-thinking-label="{{thinking_label}}"
+                >
+                    {{submit_label}}
+                </button>
+            </div>
+        </form>
+
+        <div id="ai-assistant-output-wrap" class="ai-assistant-output-wrap" hidden>
+            <div class="ai-assistant-output-header">
+                <span class="ai-assistant-output-label">Результат</span>
+                <button
+                    type="button"
+                    id="ai-assistant-copy"
+                    class="ai-assistant-btn ai-assistant-btn--ghost ai-assistant-btn--sm"
+                    data-copy-label="{{copy_label}}"
+                    data-copied-label="{{copied_label}}"
+                >
+                    {{copy_label}}
+                </button>
+            </div>
+            <div id="ai-assistant-output" class="ai-assistant-output" aria-live="polite"></div>
+        </div>
+
+        <div id="ai-assistant-error" class="ai-assistant-error" hidden>
+            {{error_msg}}
+        </div>
+    </div>
+
+</div>
+
+<button id="ai-assistant-fab" class="ai-assistant-fab" aria-label="Відкрити ШІ-асистент" title="ШІ-асистент" hidden>
+    ✦
+</button>
+
+<style>
+/* ============================================================
+   AI Assistant Panel — scoped styles
+   ============================================================ */
+
+.ai-assistant-panel {
+    position: fixed;
+    top: 80px;
+    right: 20px;
+    width: 360px;
+    max-height: calc(100vh - 100px);
+    background: #ffffff;
+    border: 1px solid #e0e4ea;
+    border-radius: 12px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12);
+    display: flex;
+    flex-direction: column;
+    z-index: 1050;
+    font-family: inherit;
+    transition: box-shadow 0.2s ease;
+}
+
+.ai-assistant-panel:hover {
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.16);
+}
+
+/* Header */
+.ai-assistant-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 14px 16px 12px;
+    border-bottom: 1px solid #f0f0f0;
+    flex-shrink: 0;
+}
+
+.ai-assistant-icon {
+    color: #7c3aed;
+    font-size: 16px;
+    line-height: 1;
+}
+
+.ai-assistant-title {
+    flex: 1;
+    margin: 0;
+    font-size: 14px;
+    font-weight: 600;
+    color: #1a1a2e;
+    letter-spacing: 0.01em;
+}
+
+.ai-assistant-toggle {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: #9ca3af;
+    font-size: 16px;
+    line-height: 1;
+    padding: 2px 4px;
+    border-radius: 4px;
+    transition: color 0.15s, background 0.15s;
+}
+
+.ai-assistant-toggle:hover {
+    color: #374151;
+    background: #f3f4f6;
+}
+
+/* Body */
+.ai-assistant-body {
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    overflow-y: auto;
+    flex: 1;
+}
+
+/* Textarea */
+.ai-assistant-textarea {
+    width: 100%;
+    border: 1px solid #d1d5db;
+    border-radius: 8px;
+    padding: 10px 12px;
+    font-size: 13px;
+    line-height: 1.5;
+    color: #374151;
+    resize: vertical;
+    min-height: 90px;
+    transition: border-color 0.15s, box-shadow 0.15s;
+    box-sizing: border-box;
+}
+
+.ai-assistant-textarea:focus {
+    outline: none;
+    border-color: #7c3aed;
+    box-shadow: 0 0 0 3px rgba(124, 58, 237, 0.12);
+}
+
+/* Actions row */
+.ai-assistant-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+}
+
+/* Buttons */
+.ai-assistant-btn {
+    border: none;
+    border-radius: 7px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+    padding: 8px 16px;
+    transition: background 0.15s, opacity 0.15s;
+    line-height: 1.4;
+}
+
+.ai-assistant-btn--primary {
+    background: #7c3aed;
+    color: #ffffff;
+}
+
+.ai-assistant-btn--primary:hover:not(:disabled) {
+    background: #6d28d9;
+}
+
+.ai-assistant-btn--primary:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.ai-assistant-btn--ghost {
+    background: #f3f4f6;
+    color: #6b7280;
+}
+
+.ai-assistant-btn--ghost:hover {
+    background: #e5e7eb;
+    color: #374151;
+}
+
+.ai-assistant-btn--sm {
+    padding: 4px 10px;
+    font-size: 12px;
+}
+
+/* Output */
+.ai-assistant-output-wrap {
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.ai-assistant-output-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 12px;
+    background: #f9fafb;
+    border-bottom: 1px solid #e5e7eb;
+}
+
+.ai-assistant-output-label {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #9ca3af;
+}
+
+.ai-assistant-output {
+    padding: 12px;
+    font-size: 13px;
+    line-height: 1.65;
+    color: #374151;
+    white-space: pre-wrap;
+    max-height: 340px;
+    overflow-y: auto;
+}
+
+/* Error */
+.ai-assistant-error {
+    padding: 10px 12px;
+    background: #fef2f2;
+    border: 1px solid #fecaca;
+    border-radius: 8px;
+    font-size: 13px;
+    color: #dc2626;
+}
+
+/* Floating action button (when panel is collapsed) */
+.ai-assistant-fab {
+    position: fixed;
+    bottom: 32px;
+    right: 24px;
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    background: #7c3aed;
+    color: #ffffff;
+    border: none;
+    font-size: 20px;
+    cursor: pointer;
+    box-shadow: 0 4px 16px rgba(124, 58, 237, 0.4);
+    z-index: 1050;
+    transition: background 0.15s, box-shadow 0.15s, transform 0.15s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.ai-assistant-fab:hover {
+    background: #6d28d9;
+    transform: scale(1.08);
+}
+
+/* Thinking spinner */
+@keyframes ai-pulse {
+    0%, 100% { opacity: 1; }
+    50%       { opacity: 0.4; }
+}
+
+.ai-assistant-btn--thinking {
+    animation: ai-pulse 1.2s ease-in-out infinite;
+}
+</style>

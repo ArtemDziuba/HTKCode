@@ -23,10 +23,22 @@ $string['task']                 = 'Що потрібно згенерувати?
 $string['task_outline']         = 'Структура курсу (план на 4 тижні)';
 $string['task_quiz']            = 'Тестові питання (формат Moodle GIFT)';
 $string['task_assignment']      = 'Завдання з критеріями оцінювання';
+$string['task_rewrite']         = 'Переробити / покращити завантажений документ';
+
+// File upload
+$string['upload_file']          = 'Завантажити наявний документ';
+$string['upload_file_optional'] = '(необов'язково)';
+$string['upload_hint']          = 'Перетягніть файл сюди або натисніть для вибору';
+$string['or']                   = 'або введіть запит нижче';
+
+// Prompt
 $string['prompt']               = 'Опишіть курс або тему';
+$string['prompt_optional']      = '(необов'язково, якщо завантажено файл)';
 $string['prompt_placeholder']   = 'Напр., Вступ до машинного навчання для студентів без попереднього досвіду…';
+
+// Actions
 $string['generate']             = 'Згенерувати';
-$string['generating']           = 'Генерується…';
+$string['generating']           = 'Генерується… це може зайняти кілька секунд';
 $string['result']               = 'Згенерований контент';
 $string['copy']                 = 'Копіювати';
 $string['copied']               = 'Скопійовано!';

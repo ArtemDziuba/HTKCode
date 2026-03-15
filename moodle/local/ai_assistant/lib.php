@@ -7,6 +7,11 @@ function local_ai_assistant_after_config(): void {
     $script = $_SERVER['SCRIPT_NAME'] ?? '';
     $direct = $_GET['direct'] ?? '';
 
+    // Never intercept our own page.
+    if (str_ends_with($script, '/local/ai_assistant/create_course.php')) {
+        return;
+    }
+
     // Only intercept /course/edit.php
     if (!str_ends_with($script, '/course/edit.php')) {
         return;
@@ -20,7 +25,7 @@ function local_ai_assistant_after_config(): void {
     // Only intercept new course creation (no id = creating, with id = editing existing)
     $id = $_GET['id'] ?? '';
     if (!empty($id)) {
-        return; // Editing an existing course — don't intercept
+        return;
     }
 
     // Preserve the category parameter if present.

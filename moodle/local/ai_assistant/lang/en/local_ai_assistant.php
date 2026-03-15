@@ -23,10 +23,22 @@ $string['task']                 = 'What do you want to generate?';
 $string['task_outline']         = 'Course structure (4-week outline)';
 $string['task_quiz']            = 'Quiz questions (Moodle GIFT format)';
 $string['task_assignment']      = 'Assignment with grading criteria';
+$string['task_rewrite']         = 'Rewrite / improve uploaded document';
+
+// File upload
+$string['upload_file']          = 'Upload existing document';
+$string['upload_file_optional'] = '(optional)';
+$string['upload_hint']          = 'Drag & drop a file here or click to browse';
+$string['or']                   = 'or type a prompt below';
+
+// Prompt
 $string['prompt']               = 'Describe your course or topic';
-$string['prompt_placeholder']   = 'e.g. Introduction to machine learning for undergraduate students with no prior experience…';
+$string['prompt_optional']      = '(optional if file uploaded)';
+$string['prompt_placeholder']   = 'e.g. Introduction to machine learning for undergraduate students…';
+
+// Actions
 $string['generate']             = 'Generate';
-$string['generating']           = 'Generating…';
+$string['generating']           = 'Generating… this may take a few seconds';
 $string['result']               = 'Generated content';
 $string['copy']                 = 'Copy';
 $string['copied']               = 'Copied!';

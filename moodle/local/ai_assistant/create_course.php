@@ -1,8 +1,8 @@
 <?php
 /**
  * Course creation choice page.
- * Shown instead of /course/edit.php?action=createcourse so lecturers can
- * pick between the standard Moodle editor or AI-assisted content generation.
+ * Shown instead of /course/edit.php so lecturers can pick between
+ * the standard Moodle editor or AI-assisted content generation.
  */
 
 require_once(__DIR__ . '/../../config.php');
@@ -12,7 +12,6 @@ require_login();
 
 $category = optional_param('category', 0, PARAM_INT);
 
-// Resolve context: course category if supplied, otherwise system.
 $context = $category
     ? context_coursecat::instance($category)
     : context_system::instance();
@@ -26,44 +25,97 @@ $PAGE->set_title(get_string('createcourse', 'local_ai_assistant'));
 $PAGE->set_heading(get_string('createcourse', 'local_ai_assistant'));
 
 // ── Handle AI form submission ────────────────────────────────────────────────
-$ai_result   = '';
-$ai_error    = '';
-$show_ai     = optional_param('show_ai', 0, PARAM_INT);
+$ai_result        = '';
+$ai_error         = '';
+$extracted_info   = ''; // Info message about uploaded file
+$show_ai          = optional_param('show_ai', 0, PARAM_INT);
 $submitted_task   = optional_param('ai_task', 'outline', PARAM_ALPHA);
 $submitted_prompt = optional_param('ai_prompt', '', PARAM_TEXT);
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ai_generate'])) {
-    require_sesskey();
-    $show_ai = 1; // Keep AI panel open after submit.
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ai_task'])) {
+    try {
+        require_sesskey();
+    } catch (Exception $e) {
+        $ai_error = 'Sesskey error: ' . $e->getMessage();
+    }
 
-    $apikey = get_config('local_ai_assistant', 'geminikey');
+    if (empty($ai_error)) {
+        $show_ai = 1;
 
-    if (empty($apikey)) {
-        $ai_error = get_string('noapikey', 'local_ai_assistant');
-    } else {
-        [$ai_result, $ai_error] = local_ai_assistant_call_gemini(
-            $submitted_task,
-            $submitted_prompt,
-            $apikey
-        );
+        $apikey = get_config('local_ai_assistant', 'geminikey');
+
+        if (empty($apikey)) {
+            $ai_error = get_string('noapikey', 'local_ai_assistant');
+        } else {
+            // ── Build the final prompt ──────────────────────────────────────
+            $final_prompt = trim($submitted_prompt);
+
+            // Handle optional file upload.
+            if (!empty($_FILES['ai_file']['name'])) {
+                $upload_error = $_FILES['ai_file']['error'];
+
+                if ($upload_error !== UPLOAD_ERR_OK) {
+                    $ai_error = 'File upload error (code ' . $upload_error . '). Please try again.';
+                } else {
+                    [$file_text, $file_error] = local_ai_assistant_extract_text($_FILES['ai_file']);
+
+                    if (!empty($file_error)) {
+                        $ai_error = $file_error;
+                    } else {
+                        $filename       = clean_filename($_FILES['ai_file']['name']);
+                        $extracted_info = 'File "' . s($filename) . '" uploaded — '
+                            . number_format(mb_strlen($file_text)) . ' characters extracted.';
+
+                        // Prepend file content to the prompt.
+                        $file_prefix  = "=== Uploaded document: " . $filename . " ===\n";
+                        $file_prefix .= $file_text . "\n";
+                        $file_prefix .= "=== End of document ===\n\n";
+
+                        if (!empty($final_prompt)) {
+                            $final_prompt = $file_prefix . "Additional instructions: " . $final_prompt;
+                        } else {
+                            $final_prompt = $file_prefix . "Please process the document above according to the selected task.";
+                        }
+
+                        // Switch to rewrite task if no task explicitly chosen and file present.
+                        if ($submitted_task === 'outline' && empty(trim($submitted_prompt))) {
+                            $submitted_task = 'rewrite';
+                        }
+                    }
+                }
+            }
+
+            if (empty($ai_error)) {
+                if (empty($final_prompt)) {
+                    $ai_error = 'Please enter a prompt or upload a file.';
+                } else {
+                    [$ai_result, $ai_error] = local_ai_assistant_call_gemini(
+                        $submitted_task,
+                        $final_prompt,
+                        $apikey
+                    );
+                }
+            }
+        }
     }
 }
 
 // ── Build URLs ───────────────────────────────────────────────────────────────
-$manual_params = ['action' => 'createcourse', 'direct' => 1];
+$manual_params = ['direct' => 1];
 if ($category) {
     $manual_params['category'] = $category;
 }
 $manual_url = new moodle_url('/course/edit.php', $manual_params);
 
-$sesskey = sesskey();
+$sesskey    = sesskey();
+$action_url = (new moodle_url('/local/ai_assistant/create_course.php',
+    $category ? ['category' => $category] : []))->out(false);
 
 // ── Output ───────────────────────────────────────────────────────────────────
 echo $OUTPUT->header();
 ?>
 
 <style>
-/* ── Choice cards ── */
 .aia-choice-wrapper {
     display: flex;
     gap: 1.5rem;
@@ -86,22 +138,12 @@ echo $OUTPUT->header();
     align-items: center;
     gap: .75rem;
 }
-.aia-card:hover {
-    border-color: #0f6cbf;
-    box-shadow: 0 4px 16px rgba(15,108,191,.12);
-}
-.aia-card.aia-card--active {
-    border-color: #0f6cbf;
-    background: #f0f6ff;
-}
-.aia-card .aia-icon {
-    font-size: 2.8rem;
-    line-height: 1;
-}
+.aia-card:hover { border-color: #0f6cbf; box-shadow: 0 4px 16px rgba(15,108,191,.12); }
+.aia-card.aia-card--active { border-color: #0f6cbf; background: #f0f6ff; }
+.aia-card .aia-icon { font-size: 2.8rem; line-height: 1; }
 .aia-card h3 { margin: 0; font-size: 1.25rem; }
 .aia-card p  { color: #6c757d; margin: 0; font-size: .9rem; }
 
-/* ── AI panel ── */
 #aia-panel {
     background: #f8f9fa;
     border: 1px solid #dee2e6;
@@ -110,10 +152,43 @@ echo $OUTPUT->header();
     margin-top: .5rem;
 }
 #aia-panel select,
-#aia-panel textarea {
-    border-radius: .5rem;
-}
+#aia-panel textarea { border-radius: .5rem; }
 #aia-panel textarea { resize: vertical; min-height: 100px; }
+
+.aia-file-zone {
+    border: 2px dashed #adb5bd;
+    border-radius: .5rem;
+    padding: 1.5rem;
+    text-align: center;
+    background: #fff;
+    cursor: pointer;
+    transition: border-color .2s, background .2s;
+    position: relative;
+}
+.aia-file-zone:hover,
+.aia-file-zone.dragover { border-color: #0f6cbf; background: #f0f6ff; }
+.aia-file-zone input[type=file] {
+    position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%;
+}
+.aia-file-zone .aia-file-icon { font-size: 2rem; display: block; margin-bottom: .5rem; }
+.aia-file-name {
+    margin-top: .5rem;
+    font-size: .85rem;
+    color: #0f6cbf;
+    font-weight: 500;
+    display: none;
+}
+
+.aia-divider {
+    display: flex;
+    align-items: center;
+    gap: .75rem;
+    margin: 1.25rem 0;
+    color: #adb5bd;
+    font-size: .85rem;
+}
+.aia-divider::before,
+.aia-divider::after { content: ''; flex: 1; height: 1px; background: #dee2e6; }
 
 .aia-result {
     margin-top: 1.25rem;
@@ -136,6 +211,15 @@ echo $OUTPUT->header();
     border-radius: .5rem;
     padding: .75rem 1rem;
 }
+.aia-info {
+    margin-top: .75rem;
+    color: #0a3622;
+    background: #d1e7dd;
+    border: 1px solid #a3cfbb;
+    border-radius: .5rem;
+    padding: .6rem 1rem;
+    font-size: .85rem;
+}
 .aia-spinner {
     display: none;
     align-items: center;
@@ -147,42 +231,39 @@ echo $OUTPUT->header();
 
 <p class="text-muted"><?= get_string('choosecreationmethod', 'local_ai_assistant') ?></p>
 
-<!-- ── Choice cards ── -->
 <div class="aia-choice-wrapper">
-
-    <!-- Manual -->
     <a href="<?= $manual_url->out(false) ?>"
        class="aia-card<?= $show_ai ? '' : ' aia-card--active' ?>">
         <span class="aia-icon">📋</span>
         <h3><?= get_string('manualcreation', 'local_ai_assistant') ?></h3>
         <p><?= get_string('manualcreation_desc', 'local_ai_assistant') ?></p>
     </a>
-
-    <!-- AI -->
     <div class="aia-card<?= $show_ai ? ' aia-card--active' : '' ?>"
-         id="aia-toggle-btn"
-         role="button" tabindex="0"
+         id="aia-toggle-btn" role="button" tabindex="0"
          aria-expanded="<?= $show_ai ? 'true' : 'false' ?>"
          aria-controls="aia-panel">
         <span class="aia-icon">✨</span>
         <h3><?= get_string('aicreation', 'local_ai_assistant') ?></h3>
         <p><?= get_string('aicreation_desc', 'local_ai_assistant') ?></p>
     </div>
-
 </div>
 
-<!-- ── AI panel ── -->
 <div id="aia-panel" <?= $show_ai ? '' : 'style="display:none"' ?>>
 
     <h4 class="mb-3"><?= get_string('generatecontent', 'local_ai_assistant') ?></h4>
 
-    <form method="POST" action="" id="aia-form">
-        <input type="hidden" name="sesskey"  value="<?= $sesskey ?>">
-        <input type="hidden" name="show_ai"  value="1">
+    <form method="POST"
+          action="<?= $action_url ?>"
+          enctype="multipart/form-data"
+          id="aia-form">
+
+        <input type="hidden" name="sesskey" value="<?= $sesskey ?>">
+        <input type="hidden" name="show_ai" value="1">
         <?php if ($category): ?>
             <input type="hidden" name="category" value="<?= $category ?>">
         <?php endif; ?>
 
+        <!-- Task selector -->
         <div class="mb-3">
             <label for="ai_task" class="form-label fw-semibold">
                 <?= get_string('task', 'local_ai_assistant') ?>
@@ -193,6 +274,7 @@ echo $OUTPUT->header();
                     'outline'    => get_string('task_outline',    'local_ai_assistant'),
                     'quiz'       => get_string('task_quiz',       'local_ai_assistant'),
                     'assignment' => get_string('task_assignment',  'local_ai_assistant'),
+                    'rewrite'    => get_string('task_rewrite',     'local_ai_assistant'),
                 ];
                 foreach ($tasks as $val => $label):
                     $sel = ($submitted_task === $val) ? ' selected' : '';
@@ -202,14 +284,32 @@ echo $OUTPUT->header();
             </select>
         </div>
 
+        <!-- File upload -->
+        <div class="mb-3">
+            <label class="form-label fw-semibold">
+                <?= get_string('upload_file', 'local_ai_assistant') ?>
+                <span class="text-muted fw-normal"><?= get_string('upload_file_optional', 'local_ai_assistant') ?></span>
+            </label>
+            <div class="aia-file-zone" id="aia-file-zone">
+                <input type="file" name="ai_file" id="ai_file" accept=".docx,.pdf,.txt">
+                <span class="aia-file-icon">📎</span>
+                <div><?= get_string('upload_hint', 'local_ai_assistant') ?></div>
+                <div class="text-muted" style="font-size:.8rem">DOCX · PDF · TXT</div>
+            </div>
+            <div class="aia-file-name" id="aia-file-name"></div>
+        </div>
+
+        <div class="aia-divider"><?= get_string('or', 'local_ai_assistant') ?></div>
+
+        <!-- Prompt -->
         <div class="mb-3">
             <label for="ai_prompt" class="form-label fw-semibold">
                 <?= get_string('prompt', 'local_ai_assistant') ?>
+                <span class="text-muted fw-normal"><?= get_string('prompt_optional', 'local_ai_assistant') ?></span>
             </label>
             <textarea name="ai_prompt" id="ai_prompt"
                       class="form-control"
-                      placeholder="<?= get_string('prompt_placeholder', 'local_ai_assistant') ?>"
-                      required><?= s($submitted_prompt) ?></textarea>
+                      placeholder="<?= get_string('prompt_placeholder', 'local_ai_assistant') ?>"><?= s($submitted_prompt) ?></textarea>
         </div>
 
         <button type="submit" name="ai_generate" class="btn btn-primary" id="aia-submit-btn">
@@ -222,8 +322,12 @@ echo $OUTPUT->header();
         </div>
     </form>
 
+    <?php if ($extracted_info): ?>
+        <div class="aia-info">✅ <?= s($extracted_info) ?></div>
+    <?php endif; ?>
+
     <?php if ($ai_error): ?>
-        <div class="aia-error"><?= s($ai_error) ?></div>
+        <div class="aia-error">⚠️ <?= s($ai_error) ?></div>
     <?php endif; ?>
 
     <?php if ($ai_result): ?>
@@ -244,7 +348,7 @@ echo $OUTPUT->header();
 (function () {
     'use strict';
 
-    // ── Toggle AI panel ──
+    // Toggle AI panel
     const toggleBtn = document.getElementById('aia-toggle-btn');
     const panel     = document.getElementById('aia-panel');
     const cards     = document.querySelectorAll('.aia-card');
@@ -255,21 +359,49 @@ echo $OUTPUT->header();
         toggleBtn.classList.add('aia-card--active');
         cards.forEach(c => { if (c !== toggleBtn) c.classList.remove('aia-card--active'); });
     }
-
     toggleBtn.addEventListener('click', openPanel);
     toggleBtn.addEventListener('keydown', e => {
         if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openPanel(); }
     });
 
-    // ── Spinner on submit ──
+    // File upload zone
+    const fileInput  = document.getElementById('ai_file');
+    const fileZone   = document.getElementById('aia-file-zone');
+    const fileNameEl = document.getElementById('aia-file-name');
+
+    fileInput.addEventListener('change', function () {
+        if (this.files.length > 0) {
+            fileNameEl.textContent = '📄 ' + this.files[0].name;
+            fileNameEl.style.display = 'block';
+            fileZone.style.borderColor = '#0f6cbf';
+            fileZone.style.background  = '#f0f6ff';
+        } else {
+            fileNameEl.style.display = 'none';
+            fileZone.style.borderColor = '';
+            fileZone.style.background  = '';
+        }
+    });
+
+    // Drag and drop
+    fileZone.addEventListener('dragover', e => { e.preventDefault(); fileZone.classList.add('dragover'); });
+    fileZone.addEventListener('dragleave', ()  => fileZone.classList.remove('dragover'));
+    fileZone.addEventListener('drop', e => {
+        e.preventDefault();
+        fileZone.classList.remove('dragover');
+        if (e.dataTransfer.files.length > 0) {
+            fileInput.files = e.dataTransfer.files;
+            fileInput.dispatchEvent(new Event('change'));
+        }
+    });
+
+    // Spinner on submit
     document.getElementById('aia-form').addEventListener('submit', function () {
-        document.getElementById('aia-submit-btn').disabled = true;
         document.getElementById('aia-spinner').style.display = 'flex';
     });
 
-    // ── Copy button ──
-    const copyBtn    = document.getElementById('aia-copy-btn');
-    const resultBox  = document.getElementById('aia-result-box');
+    // Copy button
+    const copyBtn   = document.getElementById('aia-copy-btn');
+    const resultBox = document.getElementById('aia-result-box');
     if (copyBtn && resultBox) {
         copyBtn.addEventListener('click', function () {
             navigator.clipboard.writeText(resultBox.textContent).then(() => {

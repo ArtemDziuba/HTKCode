@@ -24,16 +24,21 @@ $PAGE->set_pagelayout('standard');
 $PAGE->set_title(get_string('createcourse', 'local_ai_assistant'));
 $PAGE->set_heading(get_string('createcourse', 'local_ai_assistant'));
 
-// ── Handle AI form submission ────────────────────────────────────────────────
-$ai_result        = '';
-$ai_error         = '';
-$extracted_info   = ''; // Info message about uploaded file
-$show_ai          = optional_param('show_ai', 0, PARAM_INT);
-$submitted_task   = optional_param('ai_task', 'outline', PARAM_ALPHA);
-$submitted_prompt = optional_param('ai_prompt', '', PARAM_TEXT);
-$course_id        = 0;
+// ── State variables ──────────────────────────────────────────────────────────
+$ai_result          = '';
+$ai_error           = '';
+$extracted_info     = '';   // "File X uploaded — N chars"
+$detection_message  = '';   // Feedback about syllabus detection
+$detection_badge    = '';   // 'found' | 'generated' | ''
+$show_ai            = optional_param('show_ai', 0, PARAM_INT);
+$submitted_task     = optional_param('ai_task', 'outline', PARAM_ALPHA);
+$submitted_prompt   = optional_param('ai_prompt', '', PARAM_TEXT);
+$course_id          = 0;
 
+// ── Handle POST ──────────────────────────────────────────────────────────────
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ai_task'])) {
+
+    // --- Session key check ---
     try {
         require_sesskey();
     } catch (Exception $e) {
@@ -43,64 +48,211 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ai_task'])) {
     if (empty($ai_error)) {
         $show_ai = 1;
 
-        $apikey = get_config('local_ai_assistant', 'geminikey');
+        $apikey = get_config('local_ai_assistant', 'claudekey')
+            ?: get_config('local_ai_assistant', 'geminikey')
+            ?: get_config('local_ai_assistant', 'apikey')
+            ?: get_config('block_ai_assistant',  'claudekey')
+            ?: get_config('block_ai_assistant',  'geminikey')
+            ?: get_config('block_ai_assistant',  'apikey');
 
         if (empty($apikey)) {
-            $ai_error = get_string('noapikey', 'local_ai_assistant');
-        } else {
-            // ── Build the final prompt ──────────────────────────────────────
-            $final_prompt = trim($submitted_prompt);
+            $stored = $DB->get_records_menu('config_plugins',
+                ['plugin' => 'local_ai_assistant'], 'name', 'name, value');
+            $stored2 = $DB->get_records_menu('config_plugins',
+                ['plugin' => 'block_ai_assistant'], 'name', 'name, value');
+            $debug_keys = array_keys($stored + $stored2);
+            $hint = empty($debug_keys)
+                ? 'No config found for local_ai_assistant or block_ai_assistant.'
+                : 'Found config keys: ' . implode(', ', $debug_keys);
+            $ai_error = get_string('noapikey', 'local_ai_assistant') . ' [Debug: ' . $hint . ']';
+        }
+    }
 
-            // Handle optional file upload.
-            if (!empty($_FILES['ai_file']['name'])) {
-                $upload_error = $_FILES['ai_file']['error'];
+    if (empty($ai_error)) {
 
-                if ($upload_error !== UPLOAD_ERR_OK) {
-                    $ai_error = 'File upload error (code ' . $upload_error . '). Please try again.';
+        // Normalise $_FILES['ai_file'] (single or multiple) into a flat list.
+        $uploaded_files = [];
+        if (!empty($_FILES['ai_file']['name'])) {
+            $names  = (array) $_FILES['ai_file']['name'];
+            $tmps   = (array) $_FILES['ai_file']['tmp_name'];
+            $errors = (array) $_FILES['ai_file']['error'];
+            $sizes  = (array) $_FILES['ai_file']['size'];
+            foreach ($names as $i => $name) {
+                if (!empty($name) && ($errors[$i] ?? UPLOAD_ERR_NO_FILE) === UPLOAD_ERR_OK) {
+                    $uploaded_files[] = [
+                        'name'     => $name,
+                        'tmp_name' => $tmps[$i],
+                        'error'    => $errors[$i],
+                        'size'     => $sizes[$i],
+                    ];
+                }
+            }
+        }
+        $file_present = count($uploaded_files) > 0;
+
+        // Tasks that benefit from syllabus detection (not quiz / assignment)
+        $is_structural_task = in_array($submitted_task, ['outline', 'rewrite'], true);
+
+        // ====================================================================
+        // BRANCH A – File(s) uploaded
+        // ====================================================================
+        if ($file_present) {
+
+            // 1. Extract text from every uploaded file; concatenate into one block.
+            $file_prefix    = '';
+            $filenames_ok   = [];
+            $filenames_fail = [];
+
+            foreach ($uploaded_files as $ufile) {
+                [$file_text, $file_error] = local_ai_assistant_extract_text($ufile);
+                $fname = clean_filename($ufile['name']);
+                if (!empty($file_error)) {
+                    $filenames_fail[] = $fname . ' (' . $file_error . ')';
                 } else {
-                    [$file_text, $file_error] = local_ai_assistant_extract_text($_FILES['ai_file']);
-
-                    if (!empty($file_error)) {
-                        $ai_error = $file_error;
-                    } else {
-                        $filename       = clean_filename($_FILES['ai_file']['name']);
-                        $extracted_info = 'File "' . s($filename) . '" uploaded — '
-                            . number_format(mb_strlen($file_text)) . ' characters extracted.';
-
-                        // Prepend file content to the prompt.
-                        $file_prefix  = "=== Uploaded document: " . $filename . " ===\n";
-                        $file_prefix .= $file_text . "\n";
-                        $file_prefix .= "=== End of document ===\n\n";
-
-                        if (!empty($final_prompt)) {
-                            $final_prompt = $file_prefix . "Additional instructions: " . $final_prompt;
-                        } else {
-                            $final_prompt = $file_prefix . "Please process the document above according to the selected task.";
-                        }
-
-                        // Switch to rewrite task if no task explicitly chosen and file present.
-                        if ($submitted_task === 'outline' && empty(trim($submitted_prompt))) {
-                            $submitted_task = 'rewrite';
-                        }
-                    }
+                    $filenames_ok[] = $fname . ' — ' . number_format(mb_strlen($file_text)) . ' chars';
+                    $file_prefix   .= "=== Uploaded document: {$fname} ===\n{$file_text}\n=== End of document ===\n\n";
                 }
             }
 
-            if (empty($ai_error)) {
-                if (empty($final_prompt)) {
-                    $ai_error = 'Please enter a prompt or upload a file.';
-                } else {
-                    [$ai_result, $ai_error] = local_ai_assistant_call_gemini(
-                        $submitted_task,
-                        $final_prompt,
-                        $apikey
-                    );
+            if (!empty($filenames_fail) && empty($filenames_ok)) {
+                // Every file failed — surface the errors
+                $ai_error = 'Could not read uploaded file(s): ' . implode('; ', $filenames_fail);
+            }
 
-                    // If outline — create the actual Moodle course
-                    if (!empty($ai_result) && $submitted_task === 'outline') {
-                        $weeks     = local_ai_assistant_parse_weeks($ai_result);
-                        $cname     = !empty(trim($submitted_prompt)) ? trim($submitted_prompt) : 'AI Generated Course';
-                        $course_id = local_ai_assistant_create_moodle_course($cname, $weeks);
+            if (empty($ai_error)) {
+                $extracted_info = count($filenames_ok) . ' file(s) uploaded: ' . implode(', ', $filenames_ok);
+                if (!empty($filenames_fail)) {
+                    $extracted_info .= '. Skipped: ' . implode(', ', $filenames_fail);
+                }
+
+                // $file_text used for syllabus detection = concatenation of all files
+                $file_text = $file_prefix;
+
+                // ── A1: Structural task → try syllabus detection first ─────
+                if ($is_structural_task) {
+
+                    $detection = local_ai_assistant_detect_syllabus_json($file_text, $apikey);
+
+                    // ── A1a: Syllabus found in the document ────────────────
+                    if (!empty($detection['is_syllabus']) && !empty($detection['weeks'])) {
+
+                        $detection_badge   = 'found';
+                        $detection_message = '✅ Силабус виявлено у документі — структуру курсу взято безпосередньо з нього.';
+
+                        // Extract week titles (topics are shown in the result text but
+                        // stored as section names in the course)
+                        $week_titles = [];
+                        foreach ($detection['weeks'] as $w) {
+                            $title = trim($w['title'] ?? '');
+                            if ($title !== '') {
+                                $week_titles[] = $title;
+                            }
+                        }
+
+                        // Determine course name: document > prompt > fallback
+                        $cname = '';
+                        if (!empty(trim($detection['course_name'] ?? ''))) {
+                            $cname = trim($detection['course_name']);
+                        } elseif (!empty(trim($submitted_prompt))) {
+                            $cname = trim($submitted_prompt);
+                        } else {
+                            $cname = pathinfo(clean_filename($uploaded_files[0]['name']), PATHINFO_FILENAME);
+                        }
+
+                        // Create the Moodle course
+                        $course_id = local_ai_assistant_create_moodle_course($cname, $week_titles);
+
+                        // Attach every uploaded file to section 0
+                        if ($course_id > 0) {
+                            foreach ($uploaded_files as $ufile) {
+                                local_ai_assistant_attach_file_to_course($course_id, $ufile, 0);
+                            }
+                            // Attach as formatted DOCX
+                            local_ai_assistant_attach_syllabus_to_course(
+                                $course_id,
+                                local_ai_assistant_clean_syllabus_text($ai_result)
+                            );
+                        }
+
+                        // Build a human-readable result to display
+                        $ai_result  = "📋 Назва курсу: {$cname}\n\n";
+                        foreach ($detection['weeks'] as $i => $w) {
+                            $week_num = $i + 1;
+                            $title    = $w['title'] ?? '';
+                            $ai_result .= "Тиждень {$week_num}: {$title}\n";
+                            if (!empty($w['topics']) && is_array($w['topics'])) {
+                                foreach ($w['topics'] as $topic) {
+                                    $ai_result .= "  • {$topic}\n";
+                                }
+                            }
+                            $ai_result .= "\n";
+                        }
+
+                    // ── A1b: No syllabus found → generate one from document ─
+                    } else {
+
+                        $detection_badge   = 'generated';
+                        $detection_message = '⚠️ Силабус не знайдено у документі — генерую структуру курсу на основі його вмісту.';
+
+                        // Build a rich prompt: document text + optional extra instruction
+                        $generate_prompt = $file_prefix;
+                        if (!empty(trim($submitted_prompt))) {
+                            $generate_prompt .= "Додаткові інструкції: " . trim($submitted_prompt);
+                        } else {
+                            $generate_prompt .= "На основі цього документа створи структуру курсу на 4 тижні.";
+                        }
+
+                        [$ai_result, $ai_error] = local_ai_assistant_call_gemini('outline', $generate_prompt, $apikey);
+
+                        if (!empty($ai_result) && empty($ai_error)) {
+                            $ai_result   = local_ai_assistant_clean_syllabus_text($ai_result);
+                            $week_titles = local_ai_assistant_parse_weeks($ai_result);
+                            $raw_name    = !empty(trim($submitted_prompt))
+                                ? trim($submitted_prompt)
+                                : pathinfo(clean_filename($uploaded_files[0]['name']), PATHINFO_FILENAME);
+                            $cname       = local_ai_assistant_extract_course_name($raw_name, $apikey);
+                            $course_id   = local_ai_assistant_create_moodle_course($cname, $week_titles);
+
+                            if ($course_id > 0) {
+                                foreach ($uploaded_files as $ufile) {
+                                    local_ai_assistant_attach_file_to_course($course_id, $ufile, 0);
+                                }
+                                local_ai_assistant_attach_syllabus_to_course($course_id, $ai_result);
+                            }
+                        }
+                    }
+
+                // ── A2: Non-structural task (quiz / assignment) + file ─────────
+                } else {
+                    $final_prompt = $file_prefix;
+                    if (!empty(trim($submitted_prompt))) {
+                        $final_prompt .= "Додаткові інструкції: " . trim($submitted_prompt);
+                    } else {
+                        $final_prompt .= "Обробіть наведений вище документ згідно з обраним завданням.";
+                    }
+
+                    [$ai_result, $ai_error] = local_ai_assistant_call_gemini($submitted_task, $final_prompt, $apikey);
+                }
+            }
+
+        // ====================================================================
+        // BRANCH B – Prompt only (no file)
+        // ====================================================================
+        } else {
+            $final_prompt = trim($submitted_prompt);
+
+            if (empty($final_prompt)) {
+                $ai_error = 'Будь ласка, введіть промпт або завантажте файл.';
+            } else {
+                [$ai_result, $ai_error] = local_ai_assistant_call_gemini($submitted_task, $final_prompt, $apikey);
+
+                if (!empty($ai_result) && empty($ai_error) && $submitted_task === 'outline') {
+                    $week_titles = local_ai_assistant_parse_weeks($ai_result);
+                    $cname       = local_ai_assistant_extract_course_name(trim($submitted_prompt), $apikey);
+                    $course_id   = local_ai_assistant_create_moodle_course($cname, $week_titles);
+                    if ($course_id > 0) {
+                        $ai_result = local_ai_assistant_clean_syllabus_text($ai_result);
+                        local_ai_assistant_attach_syllabus_to_course($course_id, $ai_result);
                     }
                 }
             }
@@ -114,7 +266,6 @@ if ($category) {
     $manual_params['category'] = $category;
 }
 $manual_url = new moodle_url('/course/edit.php', $manual_params);
-
 $sesskey    = sesskey();
 $action_url = (new moodle_url('/local/ai_assistant/create_course.php',
     $category ? ['category' => $category] : []))->out(false);
@@ -197,6 +348,17 @@ echo $OUTPUT->header();
 }
 .aia-divider::before,
 .aia-divider::after { content: ''; flex: 1; height: 1px; background: #dee2e6; }
+
+/* Detection badge strip */
+.aia-detection {
+    border-radius: .5rem;
+    padding: .7rem 1rem;
+    font-size: .9rem;
+    margin-top: .75rem;
+    font-weight: 500;
+}
+.aia-detection--found     { color: #0a3622; background: #d1e7dd; border: 1px solid #a3cfbb; }
+.aia-detection--generated { color: #664d03; background: #fff3cd; border: 1px solid #ffecb5; }
 
 .aia-result {
     margin-top: 1.25rem;
@@ -290,16 +452,21 @@ echo $OUTPUT->header();
                     <option value="<?= $val ?>"<?= $sel ?>><?= $label ?></option>
                 <?php endforeach; ?>
             </select>
+            <!-- Hint shown when outline/rewrite is selected -->
+            <div id="aia-detection-hint" class="form-text text-muted mt-1"
+                 style="<?= in_array($submitted_task, ['outline','rewrite']) ? '' : 'display:none' ?>">
+                💡 Якщо ви завантажите файл, ШІ спочатку перевірить, чи містить він силабус, і використає його напряму.
+            </div>
         </div>
 
-        <!-- File upload -->
+        <!-- File upload zone -->
         <div class="mb-3">
             <label class="form-label fw-semibold">
                 <?= get_string('upload_file', 'local_ai_assistant') ?>
                 <span class="text-muted fw-normal"><?= get_string('upload_file_optional', 'local_ai_assistant') ?></span>
             </label>
             <div class="aia-file-zone" id="aia-file-zone">
-                <input type="file" name="ai_file" id="ai_file" accept=".docx,.pdf,.txt">
+                <input type="file" name="ai_file[]" id="ai_file" accept=".docx,.pdf,.txt" multiple>
                 <span class="aia-file-icon">📎</span>
                 <div><?= get_string('upload_hint', 'local_ai_assistant') ?></div>
                 <div class="text-muted" style="font-size:.8rem">DOCX · PDF · TXT</div>
@@ -330,14 +497,31 @@ echo $OUTPUT->header();
         </div>
     </form>
 
+    <!-- ── Post-submit feedback ─────────────────────────────────────────── -->
+
     <?php if ($extracted_info): ?>
-        <div class="aia-info">✅ <?= s($extracted_info) ?></div>
+        <div class="aia-info">📁 <?= s($extracted_info) ?></div>
+    <?php endif; ?>
+
+    <?php if ($detection_message): ?>
+        <?php $badge_class = $detection_badge === 'found' ? 'aia-detection--found' : 'aia-detection--generated'; ?>
+        <div class="aia-detection <?= $badge_class ?>"><?= s($detection_message) ?></div>
     <?php endif; ?>
 
     <?php if (!empty($course_id) && $course_id > 0): ?>
         <div class="aia-info" style="background:#d1e7dd;border-color:#a3cfbb;color:#0a3622;padding:1rem;border-radius:.5rem;margin-top:1rem;font-size:1rem;">
             🎉 <strong>Курс створено!</strong>
-            <a href="<?= (new moodle_url('/course/view.php', ['id' => $course_id]))->out(false) ?>" style="font-weight:700;color:#0a3622;">
+            <?php if (!empty($uploaded_files)): ?>
+                <?php
+                $attached = array_map(
+                    fn($f) => s(clean_filename($f['name'])),
+                    $uploaded_files
+                );
+                ?>
+                Файл(и) «<?= implode('», «', $attached) ?>» додано до розділу «Загальне».
+            <?php endif; ?>
+            <a href="<?= (new moodle_url('/course/view.php', ['id' => $course_id]))->out(false) ?>"
+               style="font-weight:700;color:#0a3622;margin-left:.5rem;">
                 Відкрити курс →
             </a>
         </div>
@@ -365,7 +549,7 @@ echo $OUTPUT->header();
 (function () {
     'use strict';
 
-    // Toggle AI panel
+    // ── Toggle AI panel ──────────────────────────────────────────────────────
     const toggleBtn = document.getElementById('aia-toggle-btn');
     const panel     = document.getElementById('aia-panel');
     const cards     = document.querySelectorAll('.aia-card');
@@ -381,25 +565,38 @@ echo $OUTPUT->header();
         if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openPanel(); }
     });
 
-    // File upload zone
+    // ── Task selector: show/hide detection hint ──────────────────────────────
+    const taskSelect   = document.getElementById('ai_task');
+    const detectionHint = document.getElementById('aia-detection-hint');
+    taskSelect.addEventListener('change', function () {
+        const structural = ['outline', 'rewrite'].includes(this.value);
+        detectionHint.style.display = structural ? '' : 'none';
+    });
+
+    // ── File upload zone ─────────────────────────────────────────────────────
     const fileInput  = document.getElementById('ai_file');
     const fileZone   = document.getElementById('aia-file-zone');
     const fileNameEl = document.getElementById('aia-file-name');
 
+    function updateFileZone(filename) {
+        fileNameEl.textContent      = '📄 ' + filename;
+        fileNameEl.style.display    = 'block';
+        fileZone.style.borderColor  = '#0f6cbf';
+        fileZone.style.background   = '#f0f6ff';
+    }
+
     fileInput.addEventListener('change', function () {
         if (this.files.length > 0) {
-            fileNameEl.textContent = '📄 ' + this.files[0].name;
-            fileNameEl.style.display = 'block';
-            fileZone.style.borderColor = '#0f6cbf';
-            fileZone.style.background  = '#f0f6ff';
+            const names = Array.from(this.files).map(f => f.name).join(', ');
+            updateFileZone(this.files.length === 1 ? names : this.files.length + ' files: ' + names);
         } else {
-            fileNameEl.style.display = 'none';
+            fileNameEl.style.display   = 'none';
             fileZone.style.borderColor = '';
             fileZone.style.background  = '';
         }
     });
 
-    // Drag and drop
+    // Drag-and-drop
     fileZone.addEventListener('dragover', e => { e.preventDefault(); fileZone.classList.add('dragover'); });
     fileZone.addEventListener('dragleave', ()  => fileZone.classList.remove('dragover'));
     fileZone.addEventListener('drop', e => {
@@ -411,12 +608,13 @@ echo $OUTPUT->header();
         }
     });
 
-    // Spinner on submit
+    // ── Spinner on submit ────────────────────────────────────────────────────
     document.getElementById('aia-form').addEventListener('submit', function () {
+        document.getElementById('aia-submit-btn').disabled = true;
         document.getElementById('aia-spinner').style.display = 'flex';
     });
 
-    // Copy button
+    // ── Copy button ──────────────────────────────────────────────────────────
     const copyBtn   = document.getElementById('aia-copy-btn');
     const resultBox = document.getElementById('aia-result-box');
     if (copyBtn && resultBox) {

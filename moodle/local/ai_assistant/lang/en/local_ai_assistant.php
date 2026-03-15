@@ -43,5 +43,7 @@ $string['result']               = 'Generated content';
 $string['copy']                 = 'Copy';
 $string['copied']               = 'Copied!';
 
+
+
 // Errors
 $string['noapikey'] = 'Gemini API key is not configured. Please ask your Moodle administrator to set it in Site Administration → Plugins → AI Course Assistant.';

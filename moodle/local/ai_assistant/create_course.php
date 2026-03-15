@@ -31,6 +31,7 @@ $extracted_info   = ''; // Info message about uploaded file
 $show_ai          = optional_param('show_ai', 0, PARAM_INT);
 $submitted_task   = optional_param('ai_task', 'outline', PARAM_ALPHA);
 $submitted_prompt = optional_param('ai_prompt', '', PARAM_TEXT);
+$course_id        = 0;
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ai_task'])) {
     try {
@@ -94,6 +95,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ai_task'])) {
                         $final_prompt,
                         $apikey
                     );
+
+                    // If outline — create the actual Moodle course
+                    if (!empty($ai_result) && $submitted_task === 'outline') {
+                        $weeks     = local_ai_assistant_parse_weeks($ai_result);
+                        $cname     = !empty(trim($submitted_prompt)) ? trim($submitted_prompt) : 'AI Generated Course';
+                        $course_id = local_ai_assistant_create_moodle_course($cname, $weeks);
+                    }
                 }
             }
         }
@@ -324,6 +332,15 @@ echo $OUTPUT->header();
 
     <?php if ($extracted_info): ?>
         <div class="aia-info">✅ <?= s($extracted_info) ?></div>
+    <?php endif; ?>
+
+    <?php if (!empty($course_id) && $course_id > 0): ?>
+        <div class="aia-info" style="background:#d1e7dd;border-color:#a3cfbb;color:#0a3622;padding:1rem;border-radius:.5rem;margin-top:1rem;font-size:1rem;">
+            🎉 <strong>Курс створено!</strong>
+            <a href="<?= (new moodle_url('/course/view.php', ['id' => $course_id]))->out(false) ?>" style="font-weight:700;color:#0a3622;">
+                Відкрити курс →
+            </a>
+        </div>
     <?php endif; ?>
 
     <?php if ($ai_error): ?>

@@ -43,7 +43,9 @@ bash start-win.sh
 ```
 
 
-Після запуску Moodle буде доступний за адресою: [http://localhost](http://localhost:80)
+Після запуску Moodle буде доступний за адресою: [http://localhost](http://localhost:80). Дані для входу:
+- логін `admin`;
+- пароль `test`;
  
 ---
 

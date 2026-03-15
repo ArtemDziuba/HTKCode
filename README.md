@@ -67,7 +67,7 @@ bash start-win.sh
 https://your-moodle-url/admin/index.php
 
 # Або через CLI
-php admin/cli/upgrade.php
+bin/moodle-docker-compose exec webserver php admin/cli/upgrade.php
 ```
 
 ## Вимоги для встановлення плагіну в наявний Moodle
@@ -102,13 +102,13 @@ https://your-moodle-url/my/courses.php
 Для локальної розробки плагіну редагуйте файли безпосередньо у папці `moodle/blocks/ai_assistant/`. Після змін у PHP-коді очищайте кеш:
 
 ```bash
-php admin/cli/purge_caches.php
+bin/moodle-docker-compose exec webserver php admin/cli/purge_caches.php
 ```
 
 Після змін у `db/access.php`, `db/install.xml` або `version.php` — збільшуйте версію плагіну та запускайте upgrade:
 
 ```bash
-php admin/cli/upgrade.php
+bin/moodle-docker-compose exec webserver php admin/cli/upgrade.php
 ```
 
 ---

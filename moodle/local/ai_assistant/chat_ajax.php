@@ -35,7 +35,7 @@ function json_out(array $data): void {
     echo json_encode($data, JSON_UNESCAPED_UNICODE);
     exit;
 }
-
+try {
 // ── API key ──────────────────────────────────────────────────────────────────
 $apikey = get_config('local_ai_assistant', 'claudekey')
     ?: get_config('local_ai_assistant', 'geminikey')
@@ -61,13 +61,14 @@ $history = &$SESSION->{$session_key};
 $user_message = trim(optional_param('message', '', PARAM_TEXT));
 
 // ── Pending files (persisted across turns) ───────────────────────────────────
-$files_key = 'local_ai_assistant_files_' . $USER->id;
-if (!isset($SESSION->{$files_key})) {
-    $SESSION->{$files_key} = [];
-}
+$files_key    = 'local_ai_assistant_files_'    . $USER->id;
+$syllabus_key = 'local_ai_assistant_syllabus_' . $USER->id;
+if (!isset($SESSION->{$files_key}))    { $SESSION->{$files_key}    = []; }
+if (!isset($SESSION->{$syllabus_key})) { $SESSION->{$syllabus_key} = null; }
 
 // ── Handle newly uploaded files ───────────────────────────────────────────────
-$file_texts = [];
+$file_texts       = [];
+$new_files_this_turn = [];
 
 if (!empty($_FILES['ai_file']['name'])) {
     $names  = (array) $_FILES['ai_file']['name'];
@@ -78,11 +79,11 @@ if (!empty($_FILES['ai_file']['name'])) {
         if (empty($name) || ($errors[$i] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) {
             continue;
         }
-        // Copy to a persistent temp path so it survives beyond this request
-        $persistent = tempnam(sys_get_temp_dir(), 'aia_') ;
+        $persistent = tempnam(sys_get_temp_dir(), 'aia_');
         if (move_uploaded_file($tmps[$i], $persistent)) {
             $entry = ['name' => $name, 'tmp_name' => $persistent, 'error' => 0, 'size' => filesize($persistent)];
             $SESSION->{$files_key}[] = $entry;
+            $new_files_this_turn[]   = $entry;
 
             [$text] = local_ai_assistant_extract_text($entry);
             if ($text !== '') {
@@ -90,9 +91,24 @@ if (!empty($_FILES['ai_file']['name'])) {
             }
         }
     }
+
+    // ── Syllabus detection on newly uploaded files ────────────────────────────
+    // Run detection on all newly added files; stop at first syllabus found.
+    if ($SESSION->{$syllabus_key} === null) {
+        foreach ($new_files_this_turn as $entry) {
+            [$full_text] = local_ai_assistant_extract_text($entry);
+            if ($full_text === '') continue;
+            $detection = local_ai_assistant_detect_syllabus_json($full_text, $apikey);
+            if (!empty($detection['is_syllabus']) && !empty($detection['weeks'])) {
+                $detection['source_filename'] = $entry['name'];
+                $SESSION->{$syllabus_key} = $detection;
+                break;
+            }
+        }
+    }
 }
 
-// Also extract text from previously stored files (for context in later turns)
+// Also extract text from previously stored files (for chat context in later turns)
 foreach ($SESSION->{$files_key} as $entry) {
     $already = "=== {$entry['name']} ===";
     $alreadyInTexts = false;
@@ -107,12 +123,21 @@ foreach ($SESSION->{$files_key} as $entry) {
     }
 }
 
-$uploaded_files_raw = $SESSION->{$files_key};
+$uploaded_files_raw  = $SESSION->{$files_key};
+$detected_syllabus   = $SESSION->{$syllabus_key};
 
 // Build the full user turn content (message + file excerpts)
 $full_user_message = $user_message;
 if (!empty($file_texts)) {
-    $full_user_message .= "\n\n[Завантажені файли:]\n" . implode("\n\n", $file_texts);
+    // If a syllabus was detected in the files, tell the bot explicitly
+    if ($detected_syllabus !== null) {
+        $full_user_message .= "\n\n[Система: у завантаженому файлі виявлено силабус курсу «"
+            . ($detected_syllabus['course_name'] ?? '') . "» з "
+            . count($detected_syllabus['weeks']) . " тижнів/модулів. "
+            . "Структуру буде взято безпосередньо з файлу.]";
+    } else {
+        $full_user_message .= "\n\n[Завантажені файли:]\n" . implode("\n\n", $file_texts);
+    }
 }
 
 if ($full_user_message === '') {
@@ -142,6 +167,16 @@ if (count($history) > 20) {
 // ── Create course when AI says ready ─────────────────────────────────────────
 if ($ready && !empty($course_name) && !empty($weeks_data)) {
 
+    // If a syllabus was detected in the uploaded files, use its structure
+    // instead of the AI-generated one
+    if ($detected_syllabus !== null && !empty($detected_syllabus['weeks'])) {
+        $weeks_data  = $detected_syllabus['weeks'];
+        // Prefer course name from the document if AI didn't provide one
+        if (empty($course_name) && !empty($detected_syllabus['course_name'])) {
+            $course_name = $detected_syllabus['course_name'];
+        }
+    }
+
     $week_titles = array_filter(array_map(fn($w) => trim($w['title'] ?? ''), $weeks_data));
 
     $course_id = local_ai_assistant_create_moodle_course(
@@ -154,25 +189,45 @@ if ($ready && !empty($course_name) && !empty($weeks_data)) {
         // Section summaries
         local_ai_assistant_set_section_summaries($course_id, $weeks_data);
 
-        // Attach uploaded files to best-matching sections
+        // Attach uploaded files.
+        // If a file was identified as the syllabus, pin it to section 0 (General).
+        // All other files are matched to their best week section via Gemini.
+        $syllabus_filename = $detected_syllabus !== null
+            ? ($detected_syllabus['source_filename'] ?? null)
+            : null;
+
         foreach ($uploaded_files_raw as $ufile) {
-            [$excerpt] = local_ai_assistant_extract_text($ufile);
-            $sec = local_ai_assistant_match_file_to_section(
-                $ufile['name'], $excerpt, array_values($week_titles), $apikey
-            );
-            local_ai_assistant_attach_file_to_course($course_id, $ufile, $sec);
+            $is_syllabus_file = $syllabus_filename !== null
+                && $ufile['name'] === $syllabus_filename;
+
+            if ($is_syllabus_file) {
+                local_ai_assistant_attach_file_to_course($course_id, $ufile, 0);
+            } else {
+                [$excerpt] = local_ai_assistant_extract_text($ufile);
+                $sec = local_ai_assistant_match_file_to_section(
+                    $ufile['name'], $excerpt, array_values($week_titles), $apikey
+                );
+                local_ai_assistant_attach_file_to_course($course_id, $ufile, $sec);
+            }
         }
 
-        // Build + attach syllabus DOCX
-        $syllabus_text = "Назва курсу: {$course_name}\n\n";
-        foreach ($weeks_data as $i => $w) {
-            $syllabus_text .= "Тиждень " . ($i + 1) . ": " . ($w['title'] ?? '') . "\n";
-            foreach (($w['topics'] ?? []) as $topic) {
-                $syllabus_text .= "• {$topic}\n";
+        // Build + attach syllabus DOCX only if no original syllabus file was detected.
+        // When a syllabus was found in an uploaded file, that file is already
+        // attached above — no need to generate a duplicate.
+        if ($detected_syllabus === null) {
+            $syllabus_text = "Назва курсу: {$course_name}\n\n";
+            foreach ($weeks_data as $i => $w) {
+                $syllabus_text .= "Тиждень " . ($i + 1) . ": " . ($w['title'] ?? '') . "\n";
+                foreach (($w['topics'] ?? []) as $topic) {
+                    $syllabus_text .= "• {$topic}\n";
+                }
+                $syllabus_text .= "\n";
             }
-            $syllabus_text .= "\n";
+            local_ai_assistant_attach_syllabus_to_course($course_id, $syllabus_text);
+            $reply .= "\n\n📄 Силабус створено автоматично на основі структури курсу.";
+        } else {
+            $reply .= "\n\n📎 Силабус взято з завантаженого файлу «" . s($detected_syllabus['source_filename'] ?? '') . "».";
         }
-        local_ai_assistant_attach_syllabus_to_course($course_id, $syllabus_text);
 
         // Clean up persistent temp files and clear session
         foreach ($SESSION->{$files_key} as $entry) {
@@ -180,8 +235,9 @@ if ($ready && !empty($course_name) && !empty($weeks_data)) {
                 @unlink($entry['tmp_name']);
             }
         }
-        $SESSION->{$session_key} = [];
-        $SESSION->{$files_key}   = [];
+        $SESSION->{$session_key}  = [];
+        $SESSION->{$files_key}    = [];
+        $SESSION->{$syllabus_key} = null;
 
         $course_url = (new moodle_url('/course/view.php', ['id' => $course_id]))->out(false);
 
@@ -197,3 +253,6 @@ if ($ready && !empty($course_name) && !empty($weeks_data)) {
 }
 
 json_out(['reply' => $reply, 'ready' => false]);
+} catch (Exception $e) {
+    json_out(['error' => 'Помилка: ' . $e->getMessage()]);
+}

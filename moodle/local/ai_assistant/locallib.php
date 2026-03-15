@@ -87,18 +87,20 @@ function local_ai_assistant_chat_turn(array $history, string $apikey): array {
     $system = <<<'SYS'
 Ти — асистент-методист у системі Moodle. Твоя ціль — зібрати від викладача всю необхідну інформацію для створення курсу, ПІДТВЕРДИВШИ її у користувача.
 
-Обов'язкова інформація (усі три пункти мають бути явно надані користувачем):
-1. Назва курсу
-2. Тематика / що вивчатимуть студенти
-3. Кількість тижнів або модулів
+Обов'язкова інформація (усі чотири пункти мають бути явно надані користувачем):
+1. Назва курсу (повна)
+2. Коротка назва / абревіатура курсу (shortname) — унікальний короткий ідентифікатор, напр. "MATH101" або "ЛІН-АЛГ-24". Використовується в URL та навігації Moodle.
+3. Тематика / що вивчатимуть студенти
+4. Кількість тижнів або модулів
 
 ЖОРСТКІ ПРАВИЛА:
-- "ready" може бути true ТІЛЬКИ якщо користувач сам (своїми словами) надав усі три пункти вище. НЕ вигадуй і НЕ припускай значення самостійно.
+- "ready" може бути true ТІЛЬКИ якщо користувач сам (своїми словами) надав усі чотири пункти вище. НЕ вигадуй і НЕ припускай значення самостійно.
 - Якщо хоча б один пункт не вказано явно — задай ОДНЕ коротке питання про відсутній пункт. НЕ перераховуй все що зібрав.
-- Коли всі три пункти є — запропонуй коротке резюме (назва, тижні, головні теми) і запитай «Створити курс?» або подібне. Чекай підтвердження.
+- Коли всі чотири пункти є — запропонуй коротке резюме і запитай «Створити курс?». Чекай підтвердження.
 - Тільки після явного «так», «створи», «підтверджую» або аналогічного — встанови "ready": true і заповни "weeks".
 - Спілкуйся виключно українською мовою. Будь лаконічним.
-- "course_name" — 2–6 слів, з великої літери, без лапок.
+- "course_name" — повна назва курсу.
+- "course_shortname" — коротка назва, яку вказав користувач (без змін).
 - "weeks" — масив {"title": "...", "topics": ["...", ...]}, максимум 12 елементів.
 
 Відповідай ТІЛЬКИ валідним JSON без markdown:
@@ -106,6 +108,7 @@ function local_ai_assistant_chat_turn(array $history, string $apikey): array {
   "message": "текст для користувача",
   "ready": false,
   "course_name": "",
+  "course_shortname": "",
   "weeks": [],
   "description": ""
 }
@@ -823,11 +826,26 @@ function local_ai_assistant_match_file_to_section(
  * @param  string[] $weeks      Array of week/section titles
  * @return int  New course ID, or 0 on failure
  */
-function local_ai_assistant_create_moodle_course(string $coursename, array $weeks): int {
+function local_ai_assistant_create_moodle_course(string $coursename, array $weeks, ?string $shortname = null): int {
     global $CFG, $DB, $USER;
     require_once($CFG->dirroot . '/course/lib.php');
 
-    $shortname = mb_substr(preg_replace('/\s+/', '_', trim($coursename)), 0, 15) . '_' . time();
+    // Use user-provided shortname if given, otherwise auto-generate
+    if (!empty($shortname)) {
+        // Sanitise: keep letters, digits, hyphens, underscores; cap at 100 chars
+        $shortname = preg_replace('/[^a-zA-Z0-9\-_а-яА-ЯіІїЇєЄ]/u', '', $shortname);
+        $shortname = mb_substr(trim($shortname), 0, 100);
+    }
+    if (empty($shortname)) {
+        $shortname = mb_substr(preg_replace('/\s+/', '_', trim($coursename)), 0, 15) . '_' . time();
+    }
+
+    // Ensure uniqueness
+    $base   = $shortname;
+    $suffix = 1;
+    while ($DB->record_exists('course', ['shortname' => $shortname])) {
+        $shortname = $base . '_' . $suffix++;
+    }
 
     $coursedata              = new stdClass();
     $coursedata->fullname    = $coursename;

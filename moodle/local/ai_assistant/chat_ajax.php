@@ -125,10 +125,11 @@ $history[] = ['role' => 'user', 'content' => $full_user_message];
 // ── AI turn ───────────────────────────────────────────────────────────────────
 $ai = local_ai_assistant_chat_turn($history, $apikey);
 
-$reply      = $ai['message']     ?? 'Щось пішло не так.';
-$ready      = !empty($ai['ready']);
-$course_name = trim($ai['course_name'] ?? '');
-$weeks_data  = $ai['weeks']       ?? [];
+$reply           = $ai['message']          ?? 'Щось пішло не так.';
+$ready           = !empty($ai['ready']);
+$course_name     = trim($ai['course_name']      ?? '');
+$course_shortname = trim($ai['course_shortname'] ?? '');
+$weeks_data      = $ai['weeks']             ?? [];
 
 // Append assistant turn to history
 $history[] = ['role' => 'assistant', 'content' => $reply];
@@ -143,7 +144,11 @@ if ($ready && !empty($course_name) && !empty($weeks_data)) {
 
     $week_titles = array_filter(array_map(fn($w) => trim($w['title'] ?? ''), $weeks_data));
 
-    $course_id = local_ai_assistant_create_moodle_course($course_name, array_values($week_titles));
+    $course_id = local_ai_assistant_create_moodle_course(
+        $course_name,
+        array_values($week_titles),
+        $course_shortname ?: null
+    );
 
     if ($course_id > 0) {
         // Section summaries

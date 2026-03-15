@@ -64,6 +64,99 @@ function local_ai_assistant_call_gemini(string $task, string $prompt, string $ap
     return $text === '' ? ['', 'Gemini returned an empty response.'] : [$text, ''];
 }
 
+// ── Chatbot Conversation ─────────────────────────────────────────────────────
+
+/**
+ * Drives one turn of the course-creation chatbot conversation.
+ *
+ * Sends the full conversation history to Gemini with a structured system
+ * prompt. Gemini must reply ONLY with a JSON object:
+ * {
+ *   "message":     string   — what to say back to the user (Ukrainian),
+ *   "ready":       bool     — true when enough info exists to create the course,
+ *   "course_name": string   — extracted clean course title (or ""),
+ *   "weeks":       [{"title": string, "topics": [string]}]  — course structure,
+ *   "description": string   — one-sentence course description (or "")
+ * }
+ *
+ * @param  array  $history   [{role:'user'|'assistant', content:string}, ...]
+ * @param  string $apikey
+ * @return array  Decoded JSON array, or ['message' => error_text, 'ready' => false]
+ */
+function local_ai_assistant_chat_turn(array $history, string $apikey): array {
+    $system = <<<'SYS'
+Ти — асистент-методист у системі Moodle. Твоя ціль — зібрати від викладача всю необхідну інформацію для створення курсу, ПІДТВЕРДИВШИ її у користувача.
+
+Обов'язкова інформація (усі три пункти мають бути явно надані користувачем):
+1. Назва курсу
+2. Тематика / що вивчатимуть студенти
+3. Кількість тижнів або модулів
+
+ЖОРСТКІ ПРАВИЛА:
+- "ready" може бути true ТІЛЬКИ якщо користувач сам (своїми словами) надав усі три пункти вище. НЕ вигадуй і НЕ припускай значення самостійно.
+- Якщо хоча б один пункт не вказано явно — задай ОДНЕ коротке питання про відсутній пункт. НЕ перераховуй все що зібрав.
+- Коли всі три пункти є — запропонуй коротке резюме (назва, тижні, головні теми) і запитай «Створити курс?» або подібне. Чекай підтвердження.
+- Тільки після явного «так», «створи», «підтверджую» або аналогічного — встанови "ready": true і заповни "weeks".
+- Спілкуйся виключно українською мовою. Будь лаконічним.
+- "course_name" — 2–6 слів, з великої літери, без лапок.
+- "weeks" — масив {"title": "...", "topics": ["...", ...]}, максимум 12 елементів.
+
+Відповідай ТІЛЬКИ валідним JSON без markdown:
+{
+  "message": "текст для користувача",
+  "ready": false,
+  "course_name": "",
+  "weeks": [],
+  "description": ""
+}
+SYS;
+
+    // Build Gemini contents array from history
+    $contents = [];
+    foreach ($history as $turn) {
+        $contents[] = [
+            'role'  => $turn['role'] === 'assistant' ? 'model' : 'user',
+            'parts' => [['text' => $turn['content']]],
+        ];
+    }
+
+    $endpoint = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key='
+        . urlencode($apikey);
+
+    $body = json_encode([
+        'system_instruction' => ['parts' => [['text' => $system]]],
+        'contents'           => $contents,
+        'generationConfig'   => [
+            'temperature'      => 0.4,
+            'responseMimeType' => 'application/json',
+        ],
+    ]);
+
+    $curl = new curl();
+    $curl->setHeader(['Content-Type: application/json']);
+    $raw  = $curl->post($endpoint, $body);
+
+    if ($curl->get_errno()) {
+        return ['message' => 'Помилка з\'єднання з AI. Спробуйте ще раз.', 'ready' => false];
+    }
+
+    $data = json_decode($raw, true);
+    if (!empty($data['error'])) {
+        return ['message' => 'Помилка AI: ' . ($data['error']['message'] ?? 'невідома'), 'ready' => false];
+    }
+
+    $json_text = $data['candidates'][0]['content']['parts'][0]['text'] ?? '';
+    $json_text = preg_replace('/^```(?:json)?\s*/i', '', trim($json_text));
+    $json_text = preg_replace('/\s*```$/i', '', $json_text);
+
+    $parsed = json_decode($json_text, true);
+    if (json_last_error() !== JSON_ERROR_NONE || !is_array($parsed)) {
+        return ['message' => 'Не вдалося розібрати відповідь AI. Спробуйте ще раз.', 'ready' => false];
+    }
+
+    return $parsed;
+}
+
 // ── Course Name Extraction ───────────────────────────────────────────────────
 
 /**
@@ -587,6 +680,143 @@ function local_ai_assistant_parse_weeks(string $outline_text): array {
 }
 
 /**
+ * Parses a cleaned syllabus text into a structured array of weeks with topics.
+ * Each entry: ['title' => string, 'topics' => string[]]
+ *
+ * @param  string $outline_text  Cleaned outline text
+ * @return array
+ */
+function local_ai_assistant_parse_weeks_full(string $outline_text): array {
+    $weeks   = [];
+    $current = null;
+
+    foreach (explode("\n", $outline_text) as $raw) {
+        $line = trim($raw);
+        if ($line === '' || $line === '---') {
+            continue;
+        }
+
+        // Week heading: "Тиждень N: Title" or "Week N: Title"
+        if (preg_match('/^(?:тиждень|week)\s*\d+\s*[:\-\.]\s*(.+)/iu', $line, $m)) {
+            if ($current !== null) {
+                $weeks[] = $current;
+            }
+            $current = ['title' => trim(preg_replace('/\*+/', '', $m[1])), 'topics' => []];
+            continue;
+        }
+
+        // Bullet topic line
+        if ($current !== null && preg_match('/^[•*\-]\s+(.+)/', $line, $m)) {
+            $current['topics'][] = trim($m[1]);
+        }
+    }
+
+    if ($current !== null) {
+        $weeks[] = $current;
+    }
+
+    return array_slice($weeks, 0, 12);
+}
+
+/**
+ * Writes an HTML summary to each week section of a course.
+ * The summary lists the week's topics as a <ul> and is visible
+ * under the section heading on the course page.
+ *
+ * @param  int   $course_id
+ * @param  array $weeks_full  Output of local_ai_assistant_parse_weeks_full()
+ * @return void
+ */
+function local_ai_assistant_set_section_summaries(int $course_id, array $weeks_full): void {
+    global $DB;
+
+    foreach ($weeks_full as $i => $week) {
+        if (empty($week['topics'])) {
+            continue;
+        }
+
+        $section = $DB->get_record('course_sections', [
+            'course'  => $course_id,
+            'section' => $i + 1,
+        ]);
+        if (!$section) {
+            continue;
+        }
+
+        $items = '';
+        foreach ($week['topics'] as $topic) {
+            $items .= '<li>' . htmlspecialchars($topic, ENT_QUOTES, 'UTF-8') . '</li>';
+        }
+
+        $DB->set_field('course_sections', 'summary',
+            '<ul>' . $items . '</ul>', ['id' => $section->id]);
+        $DB->set_field('course_sections', 'summaryformat',
+            FORMAT_HTML, ['id' => $section->id]);
+    }
+    // No cache rebuild here — caller does it after all files are attached
+}
+
+/**
+ * Asks Gemini which week section (1-based) a given file best belongs to.
+ * Returns the matched section number, or 0 if no good match (→ General section).
+ *
+ * @param  string   $filename     Original filename
+ * @param  string   $file_excerpt First ~800 chars of extracted text (or empty)
+ * @param  string[] $week_titles  Ordered list of week titles
+ * @param  string   $apikey
+ * @return int  1-based section number, or 0 for General
+ */
+function local_ai_assistant_match_file_to_section(
+    string $filename,
+    string $file_excerpt,
+    array  $week_titles,
+    string $apikey
+): int {
+    if (empty($week_titles)) {
+        return 0;
+    }
+
+    $weeks_list = '';
+    foreach ($week_titles as $i => $title) {
+        $weeks_list .= ($i + 1) . '. ' . $title . "\n";
+    }
+
+    $prompt = "File name: {$filename}\n";
+    if ($file_excerpt !== '') {
+        $prompt .= "File excerpt:\n" . mb_substr($file_excerpt, 0, 800) . "\n";
+    }
+    $prompt .= "\nCourse weeks:\n{$weeks_list}\n"
+        . "Reply with ONLY the week number (integer) that best matches this file. "
+        . "If no week matches well, reply with 0.";
+
+    $endpoint = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key='
+        . urlencode($apikey);
+
+    $body = json_encode([
+        'contents'         => [['parts' => [['text' => $prompt]]]],
+        'generationConfig' => ['temperature' => 0.1, 'maxOutputTokens' => 5],
+    ]);
+
+    $curl = new curl();
+    $curl->setHeader(['Content-Type: application/json']);
+    $raw  = $curl->post($endpoint, $body);
+
+    if ($curl->get_errno()) {
+        return 0;
+    }
+
+    $data = json_decode($raw, true);
+    $reply = trim($data['candidates'][0]['content']['parts'][0]['text'] ?? '0');
+
+    // Extract first integer from reply
+    preg_match('/\d+/', $reply, $m);
+    $section = (int) ($m[0] ?? 0);
+
+    // Clamp to valid range
+    return ($section >= 1 && $section <= count($week_titles)) ? $section : 0;
+}
+
+/**
  * Creates a Moodle course with week sections named after supplied topics.
  *
  * @param  string   $coursename Human-readable course name
@@ -659,7 +889,7 @@ function local_ai_assistant_attach_file_to_course(int $course_id, array $uploade
     if (!function_exists('add_moduleinfo')) {
         return false;
     }
-    if (empty($uploaded_file['tmp_name']) || !is_uploaded_file($uploaded_file['tmp_name'])) {
+    if (empty($uploaded_file['tmp_name']) || !file_exists($uploaded_file['tmp_name'])) {
         return false;
     }
 

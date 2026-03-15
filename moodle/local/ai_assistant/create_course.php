@@ -73,10 +73,18 @@ echo $OUTPUT->header();
 #aia-send-btn:disabled{background:#adb5bd;cursor:not-allowed}
 #aia-send-btn:not(:disabled):hover{background:#0d5aa7}
 
-.aia-file-strip{display:flex;align-items:center;gap:.5rem;padding:.4rem 1rem;background:#fff;border-top:1px dashed #dee2e6;font-size:.8rem;color:#6c757d}
-.aia-file-strip label{cursor:pointer;color:#0f6cbf;font-weight:500;display:flex;align-items:center;gap:.3rem}
+.aia-file-strip{padding:.5rem 1rem .6rem;background:#fff;border-top:1px dashed #dee2e6}
+.aia-file-strip-top{display:flex;align-items:center;gap:.5rem;font-size:.8rem;color:#6c757d}
+.aia-file-strip label{cursor:pointer;color:#0f6cbf;font-weight:500;display:flex;align-items:center;gap:.3rem;font-size:.8rem}
 .aia-file-strip input{display:none}
-#aia-file-list{color:#0f6cbf;font-size:.78rem}
+#aia-file-grid{display:flex;flex-wrap:wrap;gap:.5rem;margin-top:.5rem}
+.aia-file-card{display:flex;align-items:center;gap:.5rem;background:#f8f9fa;border:1px solid #dee2e6;border-radius:.5rem;padding:.35rem .65rem;font-size:.78rem;color:#495057;max-width:200px;position:relative}
+.aia-file-card .fc-icon{font-size:1.1rem;flex-shrink:0}
+.aia-file-card .fc-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.aia-file-card .fc-remove{cursor:pointer;color:#adb5bd;font-size:.85rem;flex-shrink:0;line-height:1;margin-left:.25rem}
+.aia-file-card .fc-remove:hover{color:#dc3545}
+.aia-file-card--sent{opacity:.6;background:#f0f6ff;border-color:#c3d9f7}
+.aia-file-card .fc-sent{color:#0f6cbf;font-size:.8rem;flex-shrink:0;margin-left:.25rem}
 
 #aia-success{display:none;margin:1rem 1.25rem;background:#d1e7dd;border:1px solid #a3cfbb;color:#0a3622;border-radius:.5rem;padding:1rem 1.25rem;font-size:1rem}
 #aia-success a{color:#0a3622;font-weight:700}
@@ -115,8 +123,11 @@ echo $OUTPUT->header();
     </div>
 
     <div class="aia-file-strip">
-        <label>📎 Додати файл<input type="file" id="aia-file-input" accept=".docx,.pdf,.txt" multiple></label>
-        <span id="aia-file-list"></span>
+        <div class="aia-file-strip-top">
+            <label>📎 Додати файл(и)<input type="file" id="aia-file-input" accept=".docx,.pdf,.txt" multiple></label>
+            <span style="color:#adb5bd">· DOCX, PDF, TXT</span>
+        </div>
+        <div id="aia-file-grid"></div>
     </div>
 
     <div id="aia-input-row">
@@ -134,17 +145,62 @@ const msgs      = document.getElementById('aia-messages');
 const inputEl   = document.getElementById('aia-input');
 const sendBtn   = document.getElementById('aia-send-btn');
 const fileInput = document.getElementById('aia-file-input');
-const fileList  = document.getElementById('aia-file-list');
+const fileGrid  = document.getElementById('aia-file-grid');
 const successEl = document.getElementById('aia-success');
 const courseLink= document.getElementById('aia-course-link');
 const AJAX_URL  = <?= json_encode($ajax_url) ?>;
 const SESSKEY   = <?= json_encode(sesskey()) ?>;
 const CATEGORY  = <?= (int)$category ?>;
 
-fileInput.addEventListener('change', function(){
-    fileList.textContent = this.files.length
-        ? (this.files.length === 1 ? this.files[0].name : this.files.length + ' файли')
-        : '';
+let fileStore = new DataTransfer(); // files queued to send
+let sentFiles = [];                 // files already sent (shown persistently)
+
+function extIcon(name){
+    const ext = name.split('.').pop().toLowerCase();
+    if(ext==='pdf')  return '\u{1F4D5}';
+    if(ext==='docx') return '\u{1F4D8}';
+    return '\u{1F4C4}';
+}
+function renderFileCards(){
+    fileGrid.innerHTML = '';
+
+    // Sent files — greyed out, no remove button
+    sentFiles.forEach(name => {
+        const card = document.createElement('div');
+        card.className = 'aia-file-card aia-file-card--sent';
+        card.innerHTML = '<span class="fc-icon">'+extIcon(name)+'</span>'
+            +'<span class="fc-name" title="'+name.replace(/"/g,'&quot;')+'">'+name+'</span>'
+            +'<span class="fc-sent" title="Надіслано">✓</span>';
+        fileGrid.appendChild(card);
+    });
+
+    // Pending files — removable
+    const files = fileStore.files;
+    for(let i=0;i<files.length;i++){
+        const f = files[i];
+        const card = document.createElement('div');
+        card.className = 'aia-file-card';
+        card.innerHTML = '<span class="fc-icon">'+extIcon(f.name)+'</span>'
+            +'<span class="fc-name" title="'+f.name.replace(/"/g,'&quot;')+'">'+f.name+'</span>'
+            +'<span class="fc-remove" data-idx="'+i+'" title="Видалити">×</span>';
+        fileGrid.appendChild(card);
+    }
+    fileInput.files = fileStore.files;
+}
+fileGrid.addEventListener('click',function(e){
+    const btn=e.target.closest('.fc-remove');
+    if(!btn) return;
+    const idx=parseInt(btn.dataset.idx);
+    const newDT=new DataTransfer();
+    const files=fileStore.files;
+    for(let i=0;i<files.length;i++){ if(i!==idx) newDT.items.add(files[i]); }
+    fileStore=newDT;
+    renderFileCards();
+});
+fileInput.addEventListener('change',function(){
+    for(const f of this.files) fileStore.items.add(f);
+    renderFileCards();
+    this.value='';
 });
 
 inputEl.addEventListener('input', function(){
@@ -183,7 +239,9 @@ async function send(){
     const text = inputEl.value.trim();
     if(!text && fileInput.files.length === 0) return;
 
-    bubble('user', text || '📎 файл(и)');
+    const fileNames = Array.from(fileStore.files).map(f => '📎 ' + f.name);
+    const userLabel = [text, ...fileNames].filter(Boolean).join('\n');
+    bubble('user', userLabel || '📎 файл(и)');
     inputEl.value = '';
     inputEl.style.height = 'auto';
     disable(true);
@@ -193,9 +251,12 @@ async function send(){
     fd.append('sesskey', SESSKEY);
     fd.append('message', text);
     fd.append('category', CATEGORY);
-    for(const f of fileInput.files) fd.append('ai_file[]', f);
-    fileInput.value = '';
-    fileList.textContent = '';
+    for(const f of fileStore.files) {
+        fd.append('ai_file[]', f);
+        sentFiles.push(f.name); // remember as sent
+    }
+    fileStore = new DataTransfer();
+    renderFileCards();
 
     try{
         const res  = await fetch(AJAX_URL, {method:'POST', body:fd});
@@ -210,7 +271,9 @@ async function send(){
                 courseLink.href = data.course_url;
                 successEl.style.display = 'block';
                 msgs.scrollTop = msgs.scrollHeight;
-                return; // keep disabled
+                sentFiles = [];
+                renderFileCards();
+                return;
             }
         }
     } catch(e){

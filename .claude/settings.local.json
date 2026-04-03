@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(export MOODLE_DOCKER_WWWROOT=./moodle)",
+      "Bash(export MOODLE_DOCKER_DB=pgsql)",
+      "Bash(export COMPOSE_PROJECT_NAME=moodle34)",
+      "Bash(bin/moodle-docker-compose exec webserver php -r ':*)"
+    ]
+  }
+}

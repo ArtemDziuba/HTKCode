@@ -9,10 +9,10 @@ if ($hassiteconfig) {
 
     $ADMIN->add('localplugins', $settings);
 
-    $settings->add(new admin_setting_configpasswordunmask(
-        'local_ai_assistant/geminikey',
-        get_string('setting_geminikey', 'local_ai_assistant'),
-        get_string('setting_geminikey_desc', 'local_ai_assistant'),
-        ''
+    $settings->add(new admin_setting_configtext(
+        'local_ai_assistant/service_url',
+        get_string('setting_service_url', 'local_ai_assistant'),
+        get_string('setting_service_url_desc', 'local_ai_assistant'),
+        'http://localhost:8008'
     ));
 }

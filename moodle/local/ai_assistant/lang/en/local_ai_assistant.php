@@ -47,3 +47,7 @@ $string['copied']               = 'Copied!';
 
 // Errors
 $string['noapikey'] = 'Gemini API key is not configured. Please ask your Moodle administrator to set it in Site Administration → Plugins → AI Course Assistant.';
+
+// AI Service
+$string['setting_service_url']      = 'AI Service URL';
+$string['setting_service_url_desc'] = 'URL of the Python AI microservice. Example: http://ai-service:8008 (Docker) or http://localhost:8008 (local dev). The Gemini API key is forwarded to this service on every request.';

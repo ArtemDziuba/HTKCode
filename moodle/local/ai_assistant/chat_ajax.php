@@ -36,16 +36,8 @@ function json_out(array $data): void {
     exit;
 }
 try {
-// ── API key ──────────────────────────────────────────────────────────────────
-$apikey = get_config('local_ai_assistant', 'claudekey')
-    ?: get_config('local_ai_assistant', 'geminikey')
-    ?: get_config('local_ai_assistant', 'apikey')
-    ?: get_config('block_ai_assistant',  'claudekey')
-    ?: get_config('block_ai_assistant',  'geminikey');
-
-if (empty($apikey)) {
-    json_out(['error' => 'API key не налаштовано. Зверніться до адміністратора.']);
-}
+// API key is managed by the AI service via its own environment variable.
+$apikey = '';
 
 // ── Category ─────────────────────────────────────────────────────────────────
 $category = optional_param('category', 1, PARAM_INT);
@@ -82,8 +74,12 @@ if (!empty($_FILES['ai_file']['name'])) {
         $persistent = tempnam(sys_get_temp_dir(), 'aia_');
         if (move_uploaded_file($tmps[$i], $persistent)) {
             $entry = ['name' => $name, 'tmp_name' => $persistent, 'error' => 0, 'size' => filesize($persistent)];
-            $SESSION->{$files_key}[] = $entry;
-            $new_files_this_turn[]   = $entry;
+            // Deduplicate: only append if no file with the same name is already stored.
+            $existing_names = array_column($SESSION->{$files_key}, 'name');
+            if (!in_array($name, $existing_names, true)) {
+                $SESSION->{$files_key}[] = $entry;
+            }
+            $new_files_this_turn[] = $entry;
 
             [$text] = local_ai_assistant_extract_text($entry);
             if ($text !== '') {
@@ -92,18 +88,31 @@ if (!empty($_FILES['ai_file']['name'])) {
         }
     }
 
-    // ── Syllabus detection on newly uploaded files ────────────────────────────
-    // Run detection on all newly added files; stop at first syllabus found.
+    // ── Syllabus detection ────────────────────────────────────────────────────
+    // $SESSION->{$syllabus_key} is tri-state:
+    //   null  → detection not yet attempted (or previous attempt failed with an error)
+    //   false → detection ran, no syllabus found
+    //   array → syllabus found
+    // Prefer newly uploaded files; fall back to all stored files so that a
+    // detection failure (e.g. container crash) is automatically retried.
     if ($SESSION->{$syllabus_key} === null) {
-        foreach ($new_files_this_turn as $entry) {
+        $files_to_detect = !empty($new_files_this_turn) ? $new_files_this_turn : $SESSION->{$files_key};
+        $syllabus_found = false;
+        foreach ($files_to_detect as $entry) {
+            if (!file_exists($entry['tmp_name'])) continue;
             [$full_text] = local_ai_assistant_extract_text($entry);
             if ($full_text === '') continue;
             $detection = local_ai_assistant_detect_syllabus_json($full_text, $apikey);
             if (!empty($detection['is_syllabus']) && !empty($detection['weeks'])) {
                 $detection['source_filename'] = $entry['name'];
                 $SESSION->{$syllabus_key} = $detection;
+                $syllabus_found = true;
                 break;
             }
+        }
+        // Mark as checked so we don't re-run every turn when there's no syllabus.
+        if (!$syllabus_found && !empty($files_to_detect)) {
+            $SESSION->{$syllabus_key} = false;
         }
     }
 }
@@ -123,8 +132,9 @@ foreach ($SESSION->{$files_key} as $entry) {
     }
 }
 
-$uploaded_files_raw  = $SESSION->{$files_key};
-$detected_syllabus   = $SESSION->{$syllabus_key};
+$uploaded_files_raw = $SESSION->{$files_key};
+// Convert tri-state to binary: null/false → null (no syllabus), array → the detection result.
+$detected_syllabus  = is_array($SESSION->{$syllabus_key}) ? $SESSION->{$syllabus_key} : null;
 
 // Build the full user turn content (message + file excerpts)
 $full_user_message = $user_message;
@@ -148,13 +158,14 @@ if ($full_user_message === '') {
 $history[] = ['role' => 'user', 'content' => $full_user_message];
 
 // ── AI turn ───────────────────────────────────────────────────────────────────
-$ai = local_ai_assistant_chat_turn($history, $apikey);
+$ai = local_ai_assistant_chat_turn($history, $apikey, $detected_syllabus !== null);
 
-$reply           = $ai['message']          ?? 'Щось пішло не так.';
-$ready           = !empty($ai['ready']);
-$course_name     = trim($ai['course_name']      ?? '');
+$reply            = $ai['message']           ?? 'Щось пішло не так.';
+$ready            = !empty($ai['ready']);
+$course_name      = trim($ai['course_name']      ?? '');
 $course_shortname = trim($ai['course_shortname'] ?? '');
-$weeks_data      = $ai['weeks']             ?? [];
+$weeks_data       = $ai['weeks']             ?? [];
+$wants_syllabus   = $ai['wants_syllabus']    ?? null; // true/false/null
 
 // Append assistant turn to history
 $history[] = ['role' => 'assistant', 'content' => $reply];
@@ -211,10 +222,13 @@ if ($ready && !empty($course_name) && !empty($weeks_data)) {
             }
         }
 
-        // Build + attach syllabus DOCX only if no original syllabus file was detected.
-        // When a syllabus was found in an uploaded file, that file is already
-        // attached above — no need to generate a duplicate.
-        if ($detected_syllabus === null) {
+        // Syllabus handling:
+        // - Syllabus file detected → already attached above, nothing to generate.
+        // - No syllabus file + user confirmed generation → build and attach DOCX.
+        // - No syllabus file + user declined → skip silently.
+        if ($detected_syllabus !== null) {
+            $reply .= "\n\n📎 Силабус взято з завантаженого файлу «" . s($detected_syllabus['source_filename'] ?? '') . "».";
+        } elseif ($wants_syllabus === true) {
             $syllabus_text = "Назва курсу: {$course_name}\n\n";
             foreach ($weeks_data as $i => $w) {
                 $syllabus_text .= "Тиждень " . ($i + 1) . ": " . ($w['title'] ?? '') . "\n";
@@ -225,8 +239,6 @@ if ($ready && !empty($course_name) && !empty($weeks_data)) {
             }
             local_ai_assistant_attach_syllabus_to_course($course_id, $syllabus_text);
             $reply .= "\n\n📄 Силабус створено автоматично на основі структури курсу.";
-        } else {
-            $reply .= "\n\n📎 Силабус взято з завантаженого файлу «" . s($detected_syllabus['source_filename'] ?? '') . "».";
         }
 
         // Clean up persistent temp files and clear session

@@ -78,8 +78,11 @@ echo $OUTPUT->header();
 .aia-file-strip input{display:none}
 #aia-file-list{color:#0f6cbf;font-size:.78rem}
 
-#aia-success{display:none;margin:1rem 1.25rem;background:#d1e7dd;border:1px solid #a3cfbb;color:#0a3622;border-radius:.5rem;padding:1rem 1.25rem;font-size:1rem}
-#aia-success a{color:#0a3622;font-weight:700}
+#aia-success{display:none;margin:1rem 1.25rem;background:#d1e7dd;border:1px solid #a3cfbb;color:#0a3622;border-radius:.5rem;padding:1rem 1.25rem;font-size:1rem;display:none;align-items:center;gap:1rem;flex-wrap:wrap}
+#aia-success strong{flex:1}
+.aia-open-btn{display:inline-block;background:#0a3622;color:#fff!important;font-weight:600;padding:.5rem 1.25rem;border-radius:.5rem;text-decoration:none!important;font-size:.95rem;white-space:nowrap}
+.aia-open-btn:hover{background:#0d4a2e}
+#aia-success .aia-reset-link{color:#0a3622;font-size:.85rem}
 .aia-reset{font-size:.8rem;color:#6c757d;text-align:right;padding:.25rem 1rem .5rem}
 .aia-reset a{color:#6c757d}
 </style>
@@ -108,10 +111,9 @@ echo $OUTPUT->header();
     </div>
 
     <div id="aia-success">
-        🎉 <strong>Курс створено!</strong>
-        <a id="aia-course-link" href="#">Відкрити курс →</a>
-        &nbsp;·&nbsp;
-        <a href="<?= $reset_url ?>">Створити ще один</a>
+        <strong>🎉 Курс створено!</strong>
+        <a id="aia-course-link" href="#" class="aia-open-btn">Відкрити курс →</a>
+        <a href="<?= $reset_url ?>" class="aia-reset-link">↺ Створити ще один</a>
     </div>
 
     <div class="aia-file-strip">
@@ -208,8 +210,8 @@ async function send(){
             bubble('bot', data.reply || '');
             if(data.ready && data.course_url){
                 courseLink.href = data.course_url;
-                successEl.style.display = 'block';
-                msgs.scrollTop = msgs.scrollHeight;
+                successEl.style.display = 'flex';
+                successEl.scrollIntoView({behavior:'smooth', block:'nearest'});
                 return; // keep disabled
             }
         }

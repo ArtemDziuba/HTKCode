@@ -14,54 +14,26 @@ require_once($CFG->libdir . '/filelib.php');
  * @return array  [string $result, string $error]
  */
 function local_ai_assistant_call_gemini(string $task, string $prompt, string $apikey): array {
-    $instructions = [
-        'outline'    => 'Ти — досвідчений методист. Створи структуру курсу на 4 тижні. '
-            . 'ОБОВ\'ЯЗКОВО починай відповідь з рядка "Назва курсу: <назва>" (без зірочок, без markdown). '
-            . 'Потім для кожного тижня використовуй ТОЧНИЙ формат: "Тиждень N: Назва теми" (без зірочок). '
-            . 'Для кожної теми тижня використовуй маркер "• тема". '
-            . 'НЕ додавай жодних вступних коментарів, пояснень чи підсумків — тільки структуру курсу. '
-            . 'Відповідай українською мовою.',
-        'quiz'       => 'Створи 3 тестові питання. Виводь їх ТІЛЬКИ у форматі Moodle GIFT українською мовою. '
-            . 'Без Markdown, без пояснень.',
-        'assignment' => 'Створи детальне практичне завдання з критеріями оцінювання на основі запиту. '
-            . 'Відповідай українською мовою.',
-        'rewrite'    => 'Ти — досвідчений методист. Перероби наданий документ: покращ структуру, чіткість та '
-            . 'відповідність сучасним академічним стандартам. Збережи основний зміст, але зроби його більш '
-            . 'професійним. Відповідай українською мовою.',
-    ];
+    $service_url = get_config('local_ai_assistant', 'service_url') ?: 'http://localhost:8008';
 
-    if (!isset($instructions[$task])) {
-        return ['', 'Unknown task: ' . s($task)];
-    }
-
-    $endpoint = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key='
-        . urlencode($apikey);
-
-    $body = json_encode([
-        'system_instruction' => ['parts' => [['text' => $instructions[$task]]]],
-        'contents'           => [['parts' => [['text' => $prompt]]]],
-        'generationConfig'   => ['temperature' => $task === 'quiz' ? 0.2 : 0.7],
-    ]);
-
+    $body = json_encode(['task' => $task, 'prompt' => $prompt, 'api_key' => $apikey]);
     $curl = new curl();
     $curl->setHeader(['Content-Type: application/json']);
-    $raw  = $curl->post($endpoint, $body);
+    $raw = $curl->post(rtrim($service_url, '/') . '/generate', $body);
 
     if ($curl->get_errno()) {
-        return ['', 'cURL error: ' . $curl->error];
+        return ['', 'AI service error: ' . $curl->error];
     }
 
     $data = json_decode($raw, true);
-
-    if (json_last_error() !== JSON_ERROR_NONE) {
-        return ['', 'Invalid JSON response from Gemini.'];
+    if (!is_array($data)) {
+        return ['', 'Invalid response from AI service.'];
     }
     if (!empty($data['error'])) {
-        return ['', 'Gemini API error: ' . ($data['error']['message'] ?? 'Unknown')];
+        return ['', $data['error']];
     }
-
-    $text = $data['candidates'][0]['content']['parts'][0]['text'] ?? '';
-    return $text === '' ? ['', 'Gemini returned an empty response.'] : [$text, ''];
+    $result = $data['result'] ?? '';
+    return $result !== '' ? [$result, ''] : ['', 'AI service returned an empty response.'];
 }
 
 // ── Chatbot Conversation ─────────────────────────────────────────────────────
@@ -83,77 +55,27 @@ function local_ai_assistant_call_gemini(string $task, string $prompt, string $ap
  * @param  string $apikey
  * @return array  Decoded JSON array, or ['message' => error_text, 'ready' => false]
  */
-function local_ai_assistant_chat_turn(array $history, string $apikey): array {
-    $system = <<<'SYS'
-Ти — асистент-методист у системі Moodle. Твоя ціль — зібрати від викладача всю необхідну інформацію для створення курсу, ПІДТВЕРДИВШИ її у користувача.
+function local_ai_assistant_chat_turn(array $history, string $apikey, bool $has_syllabus = false): array {
+    $service_url = get_config('local_ai_assistant', 'service_url') ?: 'http://localhost:8008';
 
-Обов'язкова інформація (усі три пункти мають бути явно надані користувачем):
-1. Назва курсу (повна)
-2. Коротка назва / абревіатура курсу (shortname) — унікальний короткий ідентифікатор, напр. "MATH101" або "ЛІН-АЛГ-24". Використовується в URL та навігації Moodle.
-3. Кількість тижнів або модулів
-
-ЖОРСТКІ ПРАВИЛА:
-- "ready" може бути true ТІЛЬКИ якщо користувач сам (своїми словами) надав усі три пункти вище. НЕ вигадуй і НЕ припускай значення самостійно.
-- Якщо хоча б один пункт не вказано явно — задай ОДНЕ коротке питання про відсутній пункт. НЕ перераховуй все що зібрав.
-- Коли всі три пункти є — запропонуй коротке резюме і запитай «Створити курс?». Чекай підтвердження.
-- Тільки після явного «так», «створи», «підтверджую» або аналогічного — встанови "ready": true і заповни "weeks".
-- Спілкуйся виключно українською мовою. Будь лаконічним.
-- "course_name" — повна назва курсу.
-- "course_shortname" — коротка назва, яку вказав користувач (без змін).
-- "weeks" — масив {"title": "...", "topics": ["...", ...]}, максимум 12 елементів.
-
-Відповідай ТІЛЬКИ валідним JSON без markdown:
-{
-  "message": "текст для користувача",
-  "ready": false,
-  "course_name": "",
-  "course_shortname": "",
-  "weeks": [],
-  "description": ""
-}
-SYS;
-
-    // Build Gemini contents array from history
-    $contents = [];
-    foreach ($history as $turn) {
-        $contents[] = [
-            'role'  => $turn['role'] === 'assistant' ? 'model' : 'user',
-            'parts' => [['text' => $turn['content']]],
-        ];
-    }
-
-    $endpoint = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key='
-        . urlencode($apikey);
-
-    $body = json_encode([
-        'system_instruction' => ['parts' => [['text' => $system]]],
-        'contents'           => $contents,
-        'generationConfig'   => [
-            'temperature'      => 0.4,
-            'responseMimeType' => 'application/json',
-        ],
-    ]);
-
+    $body = json_encode(['history' => $history, 'api_key' => $apikey, 'has_syllabus' => $has_syllabus]);
     $curl = new curl();
     $curl->setHeader(['Content-Type: application/json']);
-    $raw  = $curl->post($endpoint, $body);
+    $raw = $curl->post(rtrim($service_url, '/') . '/chat/turn', $body);
 
     if ($curl->get_errno()) {
-        return ['message' => 'Помилка з\'єднання з AI. Спробуйте ще раз.', 'ready' => false];
+        return ['message' => 'Помилка з\'єднання з AI-сервісом. Спробуйте ще раз.', 'ready' => false];
     }
 
-    $data = json_decode($raw, true);
-    if (!empty($data['error'])) {
-        return ['message' => 'Помилка AI: ' . ($data['error']['message'] ?? 'невідома'), 'ready' => false];
+    $parsed = json_decode($raw, true);
+    if (!is_array($parsed)) {
+        return ['message' => 'Не вдалося розібрати відповідь AI-сервісу. Спробуйте ще раз.', 'ready' => false];
     }
 
-    $json_text = $data['candidates'][0]['content']['parts'][0]['text'] ?? '';
-    $json_text = preg_replace('/^```(?:json)?\s*/i', '', trim($json_text));
-    $json_text = preg_replace('/\s*```$/i', '', $json_text);
-
-    $parsed = json_decode($json_text, true);
-    if (json_last_error() !== JSON_ERROR_NONE || !is_array($parsed)) {
-        return ['message' => 'Не вдалося розібрати відповідь AI. Спробуйте ще раз.'.$json_text, 'ready' => false];
+    // Surface validation errors as the reply message so the user sees them
+    if (!empty($parsed['validation_errors'])) {
+        $parsed['message'] = implode("\n", $parsed['validation_errors']);
+        $parsed['ready'] = false;
     }
 
     return $parsed;
@@ -170,31 +92,19 @@ SYS;
  * @return string  Clean title, e.g. "Лінійна Алгебра"
  */
 function local_ai_assistant_extract_course_name(string $raw_prompt, string $apikey): string {
-    $endpoint = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key='
-        . urlencode($apikey);
+    $service_url = get_config('local_ai_assistant', 'service_url') ?: 'http://localhost:8008';
 
-    $system = 'Ти — помічник. З наданого тексту вилучи лише коротку, чітку назву навчального курсу '
-        . '(2–6 слів, заголовними літерами з великої, без лапок, без крапки в кінці). '
-        . 'Відповідай ТІЛЬКИ назвою курсу — нічого іншого.';
-
-    $body = json_encode([
-        'system_instruction' => ['parts' => [['text' => $system]]],
-        'contents'           => [['parts' => [['text' => $raw_prompt]]]],
-        'generationConfig'   => ['temperature' => 0.1, 'maxOutputTokens' => 30],
-    ]);
-
+    $body = json_encode(['prompt' => $raw_prompt, 'api_key' => $apikey]);
     $curl = new curl();
     $curl->setHeader(['Content-Type: application/json']);
-    $raw  = $curl->post($endpoint, $body);
+    $raw = $curl->post(rtrim($service_url, '/') . '/generate/course-name', $body);
 
     if ($curl->get_errno()) {
         return $raw_prompt;
     }
 
     $data = json_decode($raw, true);
-    $name = trim($data['candidates'][0]['content']['parts'][0]['text'] ?? '');
-
-    // Sanity check: if Gemini returns something too long or empty, fall back
+    $name = trim($data['course_name'] ?? '');
     return ($name !== '' && mb_strlen($name) < 100) ? $name : $raw_prompt;
 }
 
@@ -584,71 +494,19 @@ XML;
  * @return array
  */
 function local_ai_assistant_detect_syllabus_json(string $text, string $apikey): array {
-    $system = <<<'SYS'
-You are an academic document analyzer.
+    $service_url = get_config('local_ai_assistant', 'service_url') ?: 'http://localhost:8008';
 
-Analyze the provided document and determine if it contains a course syllabus or a structured course plan.
-
-Respond ONLY with a single valid JSON object — no markdown fences, no extra commentary.
-Use exactly this schema:
-{
-  "is_syllabus": <boolean>,
-  "course_name": "<string — course title extracted from the document, or empty string>",
-  "weeks": [
-    {
-      "title": "<short week/module title, e.g. Introduction to Python>",
-      "topics": ["<topic 1>", "<topic 2>"]
-    }
-  ]
-}
-
-Rules:
-- Set "is_syllabus" to true only if the document clearly describes a course schedule, learning objectives, or weekly topics.
-- "weeks" must be an empty array when "is_syllabus" is false.
-- Extract up to 12 weeks/modules maximum.
-- Respond in the same language the document is written in for titles/topics.
-SYS;
-
-    // Truncate to avoid very large payloads (≈15 000 chars is plenty for detection)
-    $truncated = mb_substr($text, 0, 15000);
-
-    $endpoint = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key='
-        . urlencode($apikey);
-
-    $body = json_encode([
-        'system_instruction' => ['parts' => [['text' => $system]]],
-        'contents'           => [['parts' => [['text' => $truncated]]]],
-        'generationConfig'   => [
-            'temperature'      => 0.1,
-            'responseMimeType' => 'application/json',
-        ],
-    ]);
-
+    $body = json_encode(['text' => $text, 'api_key' => $apikey]);
     $curl = new curl();
     $curl->setHeader(['Content-Type: application/json']);
-    $raw  = $curl->post($endpoint, $body);
+    $raw = $curl->post(rtrim($service_url, '/') . '/analyze/syllabus', $body);
 
     if ($curl->get_errno()) {
         return [];
     }
 
-    $data = json_decode($raw, true);
-    if (json_last_error() !== JSON_ERROR_NONE || !empty($data['error'])) {
-        return [];
-    }
-
-    $json_text = $data['candidates'][0]['content']['parts'][0]['text'] ?? '';
-
-    // Strip accidental markdown fences just in case
-    $json_text = preg_replace('/^```(?:json)?\s*/i', '', trim($json_text));
-    $json_text = preg_replace('/\s*```$/i', '', $json_text);
-
-    $parsed = json_decode($json_text, true);
-    if (json_last_error() !== JSON_ERROR_NONE || !is_array($parsed)) {
-        return [];
-    }
-
-    return $parsed;
+    $parsed = json_decode($raw, true);
+    return is_array($parsed) ? $parsed : [];
 }
 
 // ── Course Creation ──────────────────────────────────────────────────────────
@@ -778,44 +636,24 @@ function local_ai_assistant_match_file_to_section(
         return 0;
     }
 
-    $weeks_list = '';
-    foreach ($week_titles as $i => $title) {
-        $weeks_list .= ($i + 1) . '. ' . $title . "\n";
-    }
-
-    $prompt = "File name: {$filename}\n";
-    if ($file_excerpt !== '') {
-        $prompt .= "File excerpt:\n" . mb_substr($file_excerpt, 0, 800) . "\n";
-    }
-    $prompt .= "\nCourse weeks:\n{$weeks_list}\n"
-        . "Reply with ONLY the week number (integer) that best matches this file. "
-        . "If no week matches well, reply with 0.";
-
-    $endpoint = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key='
-        . urlencode($apikey);
+    $service_url = get_config('local_ai_assistant', 'service_url') ?: 'http://localhost:8008';
 
     $body = json_encode([
-        'contents'         => [['parts' => [['text' => $prompt]]]],
-        'generationConfig' => ['temperature' => 0.1, 'maxOutputTokens' => 5],
+        'filename'    => $filename,
+        'excerpt'     => mb_substr($file_excerpt, 0, 800),
+        'week_titles' => array_values($week_titles),
+        'api_key'     => $apikey,
     ]);
-
     $curl = new curl();
     $curl->setHeader(['Content-Type: application/json']);
-    $raw  = $curl->post($endpoint, $body);
+    $raw = $curl->post(rtrim($service_url, '/') . '/analyze/match-section', $body);
 
     if ($curl->get_errno()) {
         return 0;
     }
 
     $data = json_decode($raw, true);
-    $reply = trim($data['candidates'][0]['content']['parts'][0]['text'] ?? '0');
-
-    // Extract first integer from reply
-    preg_match('/\d+/', $reply, $m);
-    $section = (int) ($m[0] ?? 0);
-
-    // Clamp to valid range
-    return ($section >= 1 && $section <= count($week_titles)) ? $section : 0;
+    return (int) ($data['section'] ?? 0);
 }
 
 /**

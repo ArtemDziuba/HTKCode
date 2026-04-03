@@ -15,23 +15,13 @@ $courseid = required_param('courseid', PARAM_INT);
 $context = context_course::instance($courseid);
 require_capability('moodle/course:update', $context);
 
-$apikey = get_config('local_ai_assistant', 'geminikey');
+// API key is managed by the AI service via its own environment variable.
+$apikey = '';
 
-if (empty($apikey)) {
-    echo json_encode(['reply' => 'API key не налаштовано. Перейдіть в Site Administration → Plugins → AI Course Assistant.', 'actions' => []]);
-    exit;
-}
-
-// ─── Build context: sections ──────────────────────────────────────────────────
+// ─── Fetch course context (sections + assignments) ────────────────────────────
 $sections = $DB->get_records('course_sections',
     ['course' => $courseid], 'section ASC', 'id,section,name', 1, 20);
-$sections_list = '';
-foreach ($sections as $s) {
-    $label = $s->name ?: 'Тиждень ' . $s->section;
-    $sections_list .= "  Тиждень {$s->section}: {$label}\n";
-}
 
-// ─── Build context: assignments ───────────────────────────────────────────────
 $assignments = $DB->get_records_sql(
     "SELECT a.id, a.name, a.allowsubmissionsfromdate, a.duedate, a.cutoffdate, a.gradingduedate
        FROM {assign} a
@@ -40,77 +30,44 @@ $assignments = $DB->get_records_sql(
       WHERE a.course = ?
       ORDER BY a.name", [$courseid]);
 
-$assignments_list = '';
+// ─── Call AI service ──────────────────────────────────────────────────────────
+$service_url = get_config('local_ai_assistant', 'service_url') ?: 'http://localhost:8008';
+
+// Build structured sections/assignments arrays for the service
+$sections_payload = [];
+foreach ($sections as $s) {
+    $sections_payload[] = [
+        'section' => (int) $s->section,
+        'name'    => $s->name ?: 'Тиждень ' . $s->section,
+    ];
+}
+
+$assignments_payload = [];
 foreach ($assignments as $a) {
-    $from    = $a->allowsubmissionsfromdate ? date('d.m.Y H:i', $a->allowsubmissionsfromdate) : 'не задано';
-    $due     = $a->duedate                  ? date('d.m.Y H:i', $a->duedate)                  : 'не задано';
-    $cutoff  = $a->cutoffdate               ? date('d.m.Y H:i', $a->cutoffdate)               : 'не задано';
-    $grading = $a->gradingduedate           ? date('d.m.Y H:i', $a->gradingduedate)           : 'не задано';
-    $assignments_list .= "  ID {$a->id}: \"{$a->name}\"\n";
-    $assignments_list .= "    allowsubmissionsfromdate: {$from}\n";
-    $assignments_list .= "    duedate: {$due}\n";
-    $assignments_list .= "    cutoffdate: {$cutoff}\n";
-    $assignments_list .= "    gradingduedate: {$grading}\n";
+    $assignments_payload[] = [
+        'id'                         => (int) $a->id,
+        'name'                       => $a->name,
+        'allowsubmissionsfromdate'   => $a->allowsubmissionsfromdate ? date('d.m.Y H:i', $a->allowsubmissionsfromdate) : 'не задано',
+        'duedate'                    => $a->duedate                  ? date('d.m.Y H:i', $a->duedate)                  : 'не задано',
+        'cutoffdate'                 => $a->cutoffdate               ? date('d.m.Y H:i', $a->cutoffdate)               : 'не задано',
+        'gradingduedate'             => $a->gradingduedate           ? date('d.m.Y H:i', $a->gradingduedate)           : 'не задано',
+    ];
 }
-if (!$assignments_list) {
-    $assignments_list = "  (немає завдань у курсі)\n";
-}
-
-// ─── System prompt ────────────────────────────────────────────────────────────
-$system = "Ти — AI-асистент викладача в Moodle. Відповідай ВИКЛЮЧНО валідним JSON — жодного тексту поза JSON.\n\n"
-    . "Поточні секції курсу:\n{$sections_list}\n"
-    . "Поточні завдання (Assignment) курсу:\n{$assignments_list}\n"
-    . "Формат відповіді:\n"
-    . "{\"reply\": \"текст для викладача\", \"actions\": [ ...масив дій або порожній масив... ]}\n\n"
-    . "Доступні типи дій — можна повертати КІЛЬКА дій в одному масиві:\n\n"
-    . "1. Перейменувати секцію:\n"
-    . "   {\"type\": \"rename_section\", \"section\": N, \"name\": \"Нова назва\"}\n\n"
-    . "2. Додати секцію:\n"
-    . "   {\"type\": \"add_section\", \"name\": \"Назва нової секції\"}\n\n"
-    . "3. Змінити дати завдання:\n"
-    . "   {\"type\": \"update_assignment_dates\", \"assignment_id\": ID, \"dates\": {\n"
-    . "       \"allowsubmissionsfromdate\": \"DD.MM.YYYY HH:MM\",\n"
-    . "       \"duedate\":                  \"DD.MM.YYYY HH:MM\",\n"
-    . "       \"cutoffdate\":               \"DD.MM.YYYY HH:MM\",\n"
-    . "       \"gradingduedate\":           \"DD.MM.YYYY HH:MM\"\n"
-    . "   }}\n"
-    . "   ВАЖЛИВО: якщо викладач вказав не всі дати — ти ЗОБОВ'ЯЗАНИЙ порахувати решту,\n"
-    . "   зберігаючи той самий інтервал у секундах між датами що був до зміни.\n"
-    . "   Наприклад: якщо duedate зсувається на +3 дні, то cutoffdate і gradingduedate\n"
-    . "   теж зсуваються на +3 дні (якщо вони були ненульовими).\n"
-    . "   Завжди передавай ВСІ 4 поля в об'єкті dates, або \"0\" якщо дата не задана.\n\n"
-    . "Приклади:\n"
-    . "- \"Перейменуй тижні 1, 2 і 3 на Вступ, Основи, Практика\" → 3 дії rename_section\n"
-    . "- \"Додай теми про Python та про SQL\" → 2 дії add_section\n"
-    . "- \"Зсунь дедлайн завдання ID 5 на 3 дні\" → 1 дія update_assignment_dates з усіма перерахованими датами\n\n"
-    . "Якщо жодної дії не потрібно — повертай \"actions\": [].";
-
-// ─── Call Gemini ──────────────────────────────────────────────────────────────
-$endpoint = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key='
-    . urlencode($apikey);
 
 $body = json_encode([
-    'system_instruction' => ['parts' => [['text' => $system]]],
-    'contents'           => [['parts' => [['text' => $message]]]],
-    'generationConfig'   => ['temperature' => 0.2],
+    'message'     => $message,
+    'sections'    => $sections_payload,
+    'assignments' => $assignments_payload,
+    'api_key'     => $apikey,
 ]);
 
 $curl = new curl();
 $curl->setHeader(['Content-Type: application/json']);
-$raw  = $curl->post($endpoint, $body);
-$data = json_decode($raw, true);
+$raw  = $curl->post(rtrim($service_url, '/') . '/analyze/course-editor', $body);
+$parsed = json_decode($raw, true);
 
-if (!empty($data['error'])) {
-    echo json_encode(['reply' => 'Gemini error: ' . $data['error']['message'], 'actions' => []]);
-    exit;
-}
-
-$text   = $data['candidates'][0]['content']['parts'][0]['text'] ?? '{}';
-$text   = preg_replace('/```json\s*|```/i', '', $text);
-$parsed = json_decode(trim($text), true);
-
-if (json_last_error() !== JSON_ERROR_NONE) {
-    echo json_encode(['reply' => $text, 'actions' => []]);
+if ($curl->get_errno() || !is_array($parsed)) {
+    echo json_encode(['reply' => 'Помилка з\'єднання з AI-сервісом.', 'actions' => []]);
     exit;
 }
 

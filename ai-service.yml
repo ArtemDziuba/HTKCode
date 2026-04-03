@@ -1,0 +1,29 @@
+# Add the Python AI microservice to the Moodle docker-compose stack.
+#
+# Usage (alongside base.yml):
+#   docker compose -f base.yml -f db.pgsql.yml -f ai-service.yml up -d
+#
+# Or for standalone development:
+#   cd ai_assistant_service && cp .env.example .env  # fill in GEMINI_API_KEY
+#   docker compose -f ../ai-service.yml up ai-service
+
+services:
+  ai-service:
+    build:
+      context: ./ai_assistant_service
+      dockerfile: Dockerfile
+    image: ai-assistant-service:latest
+    container_name: ai_assistant_service
+    restart: unless-stopped
+    ports:
+      - "8008:8008"
+    environment:
+      GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
+      GEMINI_MODEL: "${GEMINI_MODEL:-gemini-2.0-flash}"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
